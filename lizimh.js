@@ -11,7 +11,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "1.3.0";
+    version = "1.3.1";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -235,18 +235,17 @@ class Lizimh extends ComicSource {
             }
             let lastIso = list.length ? list[list.length - 1].created_at : "";
 
-            // 把所有信息塞进标签区, 保证宿主 UI 一定显示
+            // 标签只放题材; 状态/评分/更新各有专属位置
             let labelList = (data.tags || "").split(",").filter((t) => t);
-            if (data.score && Number(data.score) > 0) {
-                labelList.push("评分" + data.score);
-            }
-            labelList.push(Lizimh.statusByLastUpdate(lastIso));
-            if (lastIso) labelList.push("更新" + Lizimh.fmtDate(lastIso));
-
             let tags = {
                 "作者": (data.author || "").split(",").filter((t) => t),
                 "标签": labelList,
+                "状态": [Lizimh.statusByLastUpdate(lastIso)],
             };
+            // 评分: 0-10 制, 带前缀; 暂无评分(0)不显示
+            if (data.score && Number(data.score) > 0) {
+                tags["评分"] = ["评分" + data.score];
+            }
 
             return new ComicDetails({
                 title: data.name || "",
