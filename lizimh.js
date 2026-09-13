@@ -4,13 +4,12 @@
  * 栗子漫画 (lizimh) 源
  * API:    http://ai.qsmm.fun        (来自 AES-ECB 解密的远程配置, 无需签名)
  * 图片:   https://cf-1.imgio.club   (无 referer 检查)
- * 逆向:   配置密钥 = libapp.so 字符串 f8d992c74b29491d8a3e3fd5f07389d8 的 ASCII 形式
  */
 
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "1.0.0";
+    version = "1.0.1";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -56,16 +55,26 @@ class Lizimh extends ComicSource {
         },
     };
 
+    // 分类页: 排行榜 (官方结构: category = {title, parts: [...]})
+    category = {
+        title: "栗子漫画",
+        parts: [{
+            name: "排行",
+            type: "fixed",
+            categories: ["热门排行"],
+            categoryParams: ["rank"],
+            itemType: "category",
+        }],
+    };
+
     categoryComics = {
-        load: async (category, options, page) => {
-            // 排行榜作为默认分类内容
+        load: async (category, param, options, page) => {
             let data = await Lizimh.getJson("/app/api/rank/list");
             let groups = data.rank_list || [];
             let comics = [];
             for (let g of groups) {
                 comics.push(...(g.comic_list || []).map(Lizimh.parseComic));
             }
-            // 去重
             let seen = new Set();
             comics = comics.filter((c) => !seen.has(c.id) && seen.add(c.id));
             return {
@@ -75,20 +84,13 @@ class Lizimh extends ComicSource {
         },
     };
 
-    category = [
-        {
-            title: "排行",
-            key: "rank",
-        },
-    ];
-
     comic = {
         loadInfo: async (id) => {
             let data = await Lizimh.getJson(`/app/api/detail/${id}`);
-            let chapters = new Map();
+            let chapters = {};
             let list = (data.chapters || []).slice().sort((a, b) => a.order - b.order);
             for (let ch of list) {
-                chapters.set(String(ch.id), ch.name || `第${ch.order}话`);
+                chapters[String(ch.id)] = ch.name || `第${ch.order}话`;
             }
             return new ComicDetails({
                 title: data.name || "",
@@ -113,7 +115,6 @@ class Lizimh extends ComicSource {
         },
 
         onImageLoad: (url, comicId, epId) => {
-            // cf-1.imgio.club 无 referer/UA 限制
             return {};
         },
 
