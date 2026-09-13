@@ -10,7 +10,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "1.2.0";
+    version = "1.2.1";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -18,6 +18,41 @@ class Lizimh extends ComicSource {
     static imgHosts = ["https://cdn.lzimg.xyz", "https://cf-1.imgio.club"];
     static fallbackTags = ["热血","格斗","武侠","魔幻","魔法","冒险","爱情","搞笑","校园","科幻","后宫","励志","职场","美食","社会","黑道","战争","历史","悬疑","竞技","体育","恐怖","推理","生活","伪娘","治愈","神鬼","四格","百合","耽美","舞蹈","侦探","宅男","音乐","萌系","古风","恋爱","都市","穿越","游戏","其他","日常","腹黑","仙侠","修仙","纯爱","唯美","青春","彩虹","权谋","宅斗","装逼","浪漫","偶像","大女主","复仇","虐心","灵异","逆袭","妖怪","架空","动作","宫斗","脑洞","战斗","怪物","系统","智斗","机甲","高甜","异能","末日","奇幻","正能量","宫廷","亲情","剧情","轻小说","暗黑","长条","玄幻","霸总","其它","节操","欧风","女神","转生","异形","反套路","重生","性转"];
     static fallbackClasses = [["国漫",1],["日漫",2],["韩漫",3],["美漫",4],["精选推荐",5]];
+
+    // 分类页结构: 默认用硬编码清单, init() 拉取服务端配置后覆盖
+    category = {
+        title: "栗子漫画",
+        parts: [
+            {
+                name: "推荐",
+                type: "fixed",
+                categories: ["热门排行"],
+                categoryParams: ["rank"],
+                itemType: "category",
+            },
+            {
+                name: "题材",
+                type: "fixed",
+                categories: Lizimh.fallbackTags,
+                categoryParams: Lizimh.fallbackTags.map((t) => "tag:" + t),
+                itemType: "category",
+            },
+            {
+                name: "地区",
+                type: "fixed",
+                categories: Lizimh.fallbackClasses.map((c) => c[0]),
+                categoryParams: Lizimh.fallbackClasses.map((c) => "class:" + c[1]),
+                itemType: "category",
+            },
+            {
+                name: "状态",
+                type: "fixed",
+                categories: ["连载", "完结"],
+                categoryParams: ["isend:0", "isend:1"],
+                itemType: "category",
+            },
+        ],
+    };
 
     static abs(path) {
         if (!path) return "";
@@ -59,64 +94,59 @@ class Lizimh extends ComicSource {
         return days > 45 ? "完结" : "连载中";
     }
 
-    // 动态拉取服务端分类配置 (init 在宿主加载源时先于 category 读取执行)
+    // 动态拉取服务端分类配置 (覆盖默认清单, 失败不影响使用)
     async init() {
         try {
             let data = await Lizimh.getJson("/app/api/config");
             let g = data.cfg_general || {};
-            if (g.category_tabs && g.category_tabs.length) {
-                this._tags = g.category_tabs;
-            }
-            let cls = data.cfg_comic_class || [];
-            if (cls.length) {
-                this._classes = cls.map((c) => [c.name, c.id]);
-            }
+            let tags = (g.category_tabs && g.category_tabs.length)
+                ? g.category_tabs : Lizimh.fallbackTags;
+            let cls = (data.cfg_comic_class || []);
+            let classes = cls.length
+                ? cls.map((c) => [c.name, c.id]) : Lizimh.fallbackClasses;
             let gens = (g.img_generator && g.img_generator.generators) || [];
             if (gens.length && gens[0].url) {
                 Lizimh.imgHosts[0] = gens[0].url;
             }
+            this.category = {
+                title: "栗子漫画",
+                parts: [
+                    {
+                        name: "推荐",
+                        type: "fixed",
+                        categories: ["热门排行"],
+                        categoryParams: ["rank"],
+                        itemType: "category",
+                    },
+                    {
+                        name: "题材",
+                        type: "fixed",
+                        categories: tags,
+                        categoryParams: tags.map((t) => "tag:" + t),
+                        itemType: "category",
+                    },
+                    {
+                        name: "地区",
+                        type: "fixed",
+                        categories: classes.map((c) => c[0]),
+                        categoryParams: classes.map((c) => "class:" + c[1]),
+                        itemType: "category",
+                    },
+                    {
+                        name: "状态",
+                        type: "fixed",
+                        categories: ["连载", "完结"],
+                        categoryParams: ["isend:0", "isend:1"],
+                        itemType: "category",
+                    },
+                ],
+            };
         } catch (e) {
-            // 配置拉取失败时用硬编码清单, 不影响使用
+            // 忽略, 使用默认清单
         }
-        let tags = this._tags || Lizimh.fallbackTags;
-        let classes = this._classes || Lizimh.fallbackClasses;
-        this.category = {
-            title: "栗子漫画",
-            parts: [
-                {
-                    name: "推荐",
-                    type: "fixed",
-                    categories: ["热门排行"],
-                    categoryParams: ["rank"],
-                    itemType: "category",
-                },
-                {
-                    name: "题材",
-                    type: "fixed",
-                    categories: tags,
-                    categoryParams: tags.map((t) => "tag:" + t),
-                    itemType: "category",
-                },
-                {
-                    name: "地区",
-                    type: "fixed",
-                    categories: classes.map((c) => c[0]),
-                    categoryParams: classes.map((c) => "class:" + c[1]),
-                    itemType: "category",
-                },
-                {
-                    name: "状态",
-                    type: "fixed",
-                    categories: ["连载", "完结"],
-                    categoryParams: ["isend:0", "isend:1"],
-                    itemType: "category",
-                },
-            ],
-        };
     }
 
-    // 分类页结构由 init() 根据服务端配置动态生成
-    category = null;
+    search = {
         load: async (keyword, options, page) => {
             let q = encodeURIComponent(keyword);
             let data = await Lizimh.getJson(`/app/api/search/full?q=${q}`);
@@ -127,9 +157,6 @@ class Lizimh extends ComicSource {
             };
         },
     };
-
-    // 分类页: 排行 / 题材 / 地区 / 状态
-    category = null;
 
     categoryComics = {
         load: async (category, param, options, page) => {
