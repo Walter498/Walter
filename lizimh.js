@@ -5,12 +5,13 @@
  * API:    http://ai.qsmm.fun          (AES-ECB 解密远程配置获得, 无需签名)
  * 图片:   cdn.lzimg.xyz (官方默认线路) + cf-1.imgio.club (备用)
  * 分类:   /app/api/config 动态提供 (题材91个 + 地区5个 + 状态)
+ * 探索:   /app/api/home/data + rank/list
  */
 
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "1.2.1";
+    version = "1.3.0";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -54,6 +55,37 @@ class Lizimh extends ComicSource {
         ],
     };
 
+    // 探索页: 首页分组 + 排行 (让源能加入探索页面)
+    explore = [
+        {
+            title: "栗子漫画",
+            type: "multiPartPage",
+            load: async (page) => {
+                let parts = [];
+                try {
+                    let home = await Lizimh.getJson("/app/api/home/data");
+                    for (let g of home.home_content_list || []) {
+                        let comics = (g.comic_list || []).map(Lizimh.parseComic);
+                        if (comics.length) {
+                            parts.push({ title: g.title || "推荐", comics: comics });
+                        }
+                    }
+                } catch (e) {}
+                try {
+                    let rank = await Lizimh.getJson("/app/api/rank/list");
+                    for (let g of rank.rank_list || []) {
+                        let comics = (g.comic_list || []).map(Lizimh.parseComic);
+                        if (comics.length) {
+                            parts.push({ title: g.title || g.name || "排行", comics: comics });
+                        }
+                    }
+                } catch (e) {}
+                if (!parts.length) throw new Error("探索页加载失败");
+                return parts;
+            },
+        },
+    ];
+
     static abs(path) {
         if (!path) return "";
         if (path.startsWith("http")) return path;
@@ -86,12 +118,17 @@ class Lizimh extends ComicSource {
         return String(iso).substring(0, 10);
     }
 
-    // 45 天规则: 最新章节距今超过 45 天视为完结
+    // 状态规则:
+    //   45 天内有更新        -> 连载中
+    //   45~365 天没有更新    -> 暂时完结
+    //   超过 365 天没有更新  -> 完结
     static statusByLastUpdate(iso) {
         if (!iso) return "未知";
         let days = (Date.now() - Date.parse(iso)) / 86400000;
         if (isNaN(days)) return "未知";
-        return days > 45 ? "完结" : "连载中";
+        if (days > 365) return "完结";
+        if (days > 45) return "暂时完结";
+        return "连载中";
     }
 
     // 动态拉取服务端分类配置 (覆盖默认清单, 失败不影响使用)
@@ -197,17 +234,20 @@ class Lizimh extends ComicSource {
                 chapters[String(ch.id)] = ch.name || `第${ch.order}话`;
             }
             let lastIso = list.length ? list[list.length - 1].created_at : "";
+
+            // 把所有信息塞进标签区, 保证宿主 UI 一定显示
+            let labelList = (data.tags || "").split(",").filter((t) => t);
+            if (data.score && Number(data.score) > 0) {
+                labelList.push("评分" + data.score);
+            }
+            labelList.push(Lizimh.statusByLastUpdate(lastIso));
+            if (lastIso) labelList.push("更新" + Lizimh.fmtDate(lastIso));
+
             let tags = {
                 "作者": (data.author || "").split(",").filter((t) => t),
-                "标签": (data.tags || "").split(",").filter((t) => t),
-                "状态": [Lizimh.statusByLastUpdate(lastIso)],
-                "最后更新": [Lizimh.fmtDate(lastIso)],
-                "人气": [String(data.hits || "")],
+                "标签": labelList,
             };
-            // 评分: 服务端 0-10 制, 0 表示暂无评分则不显示
-            if (data.score && Number(data.score) > 0) {
-                tags["评分"] = [String(data.score)];
-            }
+
             return new ComicDetails({
                 title: data.name || "",
                 cover: Lizimh.abs(data.picY || data.picX),
@@ -215,6 +255,7 @@ class Lizimh extends ComicSource {
                 tags: tags,
                 chapters: chapters,
                 stars: data.score ? Number(data.score) : null,
+                updateTime: lastIso ? Lizimh.fmtDate(lastIso) : null,
             });
         },
 
