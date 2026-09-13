@@ -9,12 +9,13 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "1.0.1";
+    version = "1.1.0";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
     static api = "http://ai.qsmm.fun";
     static img = "https://cf-1.imgio.club";
+    static tabTags = ["冒险", "恋爱", "玄幻", "修真", "搞笑", "科幻", "热血"];
 
     static abs(path) {
         if (!path) return "";
@@ -43,6 +44,12 @@ class Lizimh extends ComicSource {
         return json.data;
     }
 
+    static fmtDate(iso) {
+        if (!iso) return "";
+        // "2026-09-08T17:19:00.175Z" -> "2026-09-08"
+        return String(iso).substring(0, 10);
+    }
+
     search = {
         load: async (keyword, options, page) => {
             let q = encodeURIComponent(keyword);
@@ -55,25 +62,31 @@ class Lizimh extends ComicSource {
         },
     };
 
-    // 分类页: 排行榜 (官方结构: category = {title, parts: [...]})
+    // 分类页: 排行 + 7 个官方标签分类
     category = {
         title: "栗子漫画",
         parts: [{
-            name: "排行",
+            name: "分类",
             type: "fixed",
-            categories: ["热门排行"],
-            categoryParams: ["rank"],
+            categories: ["热门排行", ...Lizimh.tabTags],
+            categoryParams: ["rank", ...Lizimh.tabTags],
             itemType: "category",
         }],
     };
 
     categoryComics = {
         load: async (category, param, options, page) => {
-            let data = await Lizimh.getJson("/app/api/rank/list");
-            let groups = data.rank_list || [];
             let comics = [];
-            for (let g of groups) {
-                comics.push(...(g.comic_list || []).map(Lizimh.parseComic));
+            if (param === "rank") {
+                let data = await Lizimh.getJson("/app/api/rank/list");
+                for (let g of data.rank_list || []) {
+                    comics.push(...(g.comic_list || []).map(Lizimh.parseComic));
+                }
+            } else {
+                let data = await Lizimh.getJson(
+                    `/app/api/home/tab/data?tag=${encodeURIComponent(param)}`
+                );
+                comics = (data.home_tab_data || []).map(Lizimh.parseComic);
             }
             let seen = new Set();
             comics = comics.filter((c) => !seen.has(c.id) && seen.add(c.id));
@@ -92,6 +105,8 @@ class Lizimh extends ComicSource {
             for (let ch of list) {
                 chapters[String(ch.id)] = ch.name || `第${ch.order}话`;
             }
+            // 接口的 isend 字段不可靠(所有漫画都返回1), 用最新章节时间代替状态
+            let last = list.length ? list[list.length - 1].created_at : "";
             return new ComicDetails({
                 title: data.name || "",
                 cover: Lizimh.abs(data.picY || data.picX),
@@ -99,7 +114,8 @@ class Lizimh extends ComicSource {
                 tags: {
                     "作者": (data.author || "").split(",").filter((t) => t),
                     "标签": (data.tags || "").split(",").filter((t) => t),
-                    "状态": [data.isend ? "完结" : "连载"],
+                    "最新章节": list.length ? [list[list.length - 1].name || ""] : [],
+                    "最后更新": [Lizimh.fmtDate(last)],
                     "人气": [String(data.hits || "")],
                 },
                 chapters: chapters,
