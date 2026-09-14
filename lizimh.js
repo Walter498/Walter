@@ -1,7 +1,7 @@
 /** @type {import('./_venera_.js')} */
 
 /**
- * 栗子漫画 (lizimh) 源  v2.3.0
+ * 栗子漫画 (lizimh) 源  v2.4.0
  *
  * API:   http://ai.qsmm.fun      (配置 AES-ECB 解出, 無需簽名)
  * 圖片:  多條線路可選 (配置下發 generators)
@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.3.0";
+    version = "2.4.0";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -350,53 +350,88 @@ class Lizimh extends ComicSource {
     }
 
     // 由 cover 路徑推導同目錄下的全部頁面
-    //  - coverPage: 封面本身是該章的一頁, 可作為頁數下界
-    //  - CDN 有限速(429), 逐次探測都要退避重試
+    //  策略: 以封面頁碼 lo 為下界 -> 並行指數跳躍找上界 -> 並行二分收斂
+    //  小章節通常 1~2 輪來回, 大章節 3~4 輪
     async probePages(dir, ext, maxPages, coverPage) {
         const url = (i) => this.lineUrl() + dir + "/" + i + "." + ext;
         const headers = { "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148" };
-        // 返回 true/false; 持續 429 則拋錯, 避免把限速誤判成「沒有下一頁」
         const exists = async (i) => {
-            for (let attempt = 0; attempt < 4; attempt++) {
+            for (let attempt = 0; attempt < 3; attempt++) {
                 try {
                     let res = await Network.sendRequest("HEAD", url(i), headers);
                     if (res.status === 200) return true;
                     if (res.status === 404 || res.status === 403 || res.status === 400) return false;
-                    if (res.status === 429 || res.status === 503) {
-                        await this.sleep(500 * Math.pow(2, attempt));
-                        continue;
-                    }
-                    return false;
-                } catch (e) {
-                    await this.sleep(300 * (attempt + 1));
-                }
+                    if (res.status === 429 || res.status === 503) { await this.sleep(250 * (attempt + 1)); continue; }
+                    return null;
+                } catch (e) { await this.sleep(120 * (attempt + 1)); }
             }
-            throw new Error("图片线路限速中, 请稍后重试或切换线路");
+            return null;
         };
-        if (this._pageCache[dir]) {
-            let n = this._pageCache[dir];
-            let out = [];
-            for (let i = 1; i <= n; i++) out.push(url(i));
-            return out;
-        }
+        const build = (n) => { let o = []; for (let i = 1; i <= n; i++) o.push(url(i)); return o; };
+
+        if (this._pageCache[dir]) return build(this._pageCache[dir]);
+
         let lo = Math.max(1, Math.min(coverPage || 1, maxPages));
-        if (!(await exists(lo))) return [];
-        await this.sleep(100);
-        // 指數探測找上界
-        let hi = lo + 1;
-        while (hi <= maxPages && (await exists(hi))) { lo = hi; hi = Math.min(hi * 2, maxPages + 1); }
-        if (hi > maxPages) hi = maxPages + 1;
-        // 二分找最後一頁
-        while (hi - lo > 1) {
-            let mid = Math.floor((lo + hi) / 2);
-            await this.sleep(80);
-            if (await exists(mid)) lo = mid; else hi = mid;
+        // 第一輪: 一次性並行掃 lo+1 .. lo+24 (絕大多數章節在此輪命中)
+        const SWEEP = 24;
+        let ids = [];
+        for (let i = lo + 1; i <= lo + SWEEP && i <= maxPages; i++) ids.push(i);
+        if (ids.length) {
+            const r = await Promise.all(ids.map((i) => exists(i)));
+            let stop = -1;
+            for (let k = 0; k < ids.length; k++) { if (r[k] === false) { stop = k; break; } }
+            if (stop >= 0) {
+                lo = ids[stop] - 1;
+                this._pageCache[dir] = lo;
+                this.persistPages();
+                return build(lo);
+            }
+            if (!r.some((x) => x === null)) lo = ids[ids.length - 1];
+        }
+
+        // 第二輪: 並行指數跳躍找上界
+        let hi = null;
+        let K = SWEEP;
+        while (hi === null && lo + 1 <= maxPages) {
+            const probes = [];
+            for (let k = K + 1; k <= Math.min(K * 32, maxPages) && probes.length < 8; k *= 2) {
+                const t = Math.min(lo + k, maxPages);
+                if (t > lo) probes.push(t);
+            }
+            if (!probes.length) break;
+            const res = await Promise.all(probes.map((t) => exists(t)));
+            let idx = -1;
+            for (let k = 0; k < probes.length; k++) { if (res[k] === false) { idx = k; break; } }
+            if (idx >= 0) {
+                hi = probes[idx];
+                lo = idx === 0 ? lo : probes[idx - 1];
+            } else {
+                if (res.some((x) => x === null)) break;
+                lo = probes[probes.length - 1];
+                K *= 2;
+            }
+        }
+        if (hi === null) hi = Math.min(lo + 1, maxPages + 1);
+
+        // 第三輪: 並行二分收斂
+        let guard = 0;
+        while (hi - lo > 1 && guard++ < 30) {
+            const mids = [];
+            const step = Math.max(1, Math.floor((hi - lo) / 4));
+            for (let m = lo + step; m < hi; m += step) mids.push(m);
+            if (!mids.length) break;
+            const res = await Promise.all(mids.map((m) => exists(m)));
+            let newLo = lo, newHi = hi;
+            for (let k = 0; k < mids.length; k++) {
+                if (res[k] === true) newLo = Math.max(newLo, mids[k]);
+                else newHi = Math.min(newHi, mids[k]);
+            }
+            if (newLo === lo && newHi === hi) { newHi = lo + step; break; }
+            lo = newLo; hi = newHi;
         }
         this._pageCache[dir] = lo;
         this.persistPages();
-        let images = [];
-        for (let i = 1; i <= lo; i++) images.push(url(i));
-        return images;
+        return build(lo);
     }
 
     sleep(ms) {
