@@ -1,7 +1,7 @@
 /** @type {import('./_venera_.js')} */
 
 /**
- * 栗子漫画 (lizimh) 源  v2.0.0
+ * 栗子漫画 (lizimh) 源  v2.1.0
  *
  * API:   http://ai.qsmm.fun      (配置 AES-ECB 解出, 無需簽名)
  * 圖片:  多條線路可選 (配置下發 generators)
@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.0.0";
+    version = "2.1.0";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -27,22 +27,23 @@ class Lizimh extends ComicSource {
         { name: "线路1 (CF优选海外)", url: "https://cdn.lzimg.xyz" },
         { name: "线路2 (mechat)", url: "http://img.mechat.fun" },
         { name: "线路3 (i.lzimg)", url: "https://i.lzimg.xyz" },
-        { name: "线路4 (备用)", url: "https://cf-1.imgio.club" },
+        { name: "备用 (cf-1.imgio.club)", url: "https://cf-1.imgio.club" },
     ];
     static fallbackTags = ["热血","格斗","武侠","魔幻","魔法","冒险","爱情","搞笑","校园","科幻","后宫","励志","职场","美食","社会","黑道","战争","历史","悬疑","竞技","体育","恐怖","推理","生活","伪娘","治愈","神鬼","四格","百合","耽美","舞蹈","侦探","宅男","音乐","萌系","古风","恋爱","都市","穿越","游戏","其他","日常","腹黑","仙侠","修仙","纯爱","唯美","青春","彩虹","权谋","宅斗","装逼","浪漫","偶像","大女主","复仇","虐心","灵异","逆袭","妖怪","架空","动作","宫斗","脑洞","战斗","怪物","系统","智斗","机甲","高甜","异能","末日","奇幻","正能量","宫廷","亲情","剧情","轻小说","暗黑","长条","玄幻","霸总","其它","节操","欧风","女神","转生","异形","反套路","重生","性转"];
     static fallbackClasses = [["国漫",1],["日漫",2],["韩漫",3],["美漫",4],["精选推荐",5]];
 
     settings = {
         imageLine: {
-            title: "图片线路",
+            title: "图片线路 (auto=自动测速)",
             type: "select",
             options: [
-                { value: "0", text: "线路1 (CF优选海外 cdn.lzimg.xyz)" },
-                { value: "1", text: "线路2 (img.mechat.fun)" },
-                { value: "2", text: "线路3 (i.lzimg.xyz)" },
+                { value: "auto", text: "自动测速 (推荐)" },
+                { value: "0", text: "线路1 (CF优选海外)" },
+                { value: "1", text: "线路2 (mechat)" },
+                { value: "2", text: "线路3 (i.lzimg)" },
                 { value: "3", text: "备用 (cf-1.imgio.club)" },
             ],
-            default: "0",
+            default: "auto",
         },
         maxPages: {
             title: "单章最大页数 (探测上限)",
@@ -92,10 +93,26 @@ class Lizimh extends ComicSource {
         },
     ];
 
-    lineUrl() {
-        let i = 0;
-        try { i = parseInt(this.loadSetting("imageLine") || "0"); } catch (e) {}
-        if (isNaN(i) || i < 0 || i >= Lizimh.lines.length) i = 0;
+    // 圖片 URL -> 線路索引 / 原始路徑, 供失敗換線使用
+    _imgLine = {};
+    _imgPath = {};
+    _lineOrder = null;   // 測速後的線路優先順序 (索引數組)
+
+    // 當前使用哪條線 (auto 時用測速結果第一條)
+    currentLine() {
+        let setting = "auto";
+        try { setting = this.loadSetting("imageLine") || "auto"; } catch (e) {}
+        if (setting !== "auto") {
+            let i = parseInt(setting);
+            if (!isNaN(i) && i >= 0 && i < Lizimh.lines.length) return i;
+        }
+        if (this._lineOrder && this._lineOrder.length) return this._lineOrder[0];
+        return 0;
+    }
+
+    lineUrl(idx) {
+        let i = (idx === undefined || idx === null) ? this.currentLine() : idx;
+        if (i < 0 || i >= Lizimh.lines.length) i = 0;
         return Lizimh.lines[i].url;
     }
 
@@ -103,6 +120,54 @@ class Lizimh extends ComicSource {
         if (!path) return "";
         if (path.startsWith("http")) return path;
         return this.lineUrl() + path;
+    }
+
+    // 測速: 對每條線發一次 HEAD, 按延遲排序 (auto 模式使用)
+    async speedTest() {
+        let results = [];
+        for (let i = 0; i < Lizimh.lines.length; i++) {
+            let t0 = Date.now();
+            let ok = false;
+            try {
+                let res = await Promise.race([
+                    Network.sendRequest("HEAD", Lizimh.lines[i].url + "/", {}),
+                    this.sleep(2500).then(() => null),
+                ]);
+                ok = res && res.status && res.status < 500;
+            } catch (e) { ok = false; }
+            let dt = Date.now() - t0;
+            results.push({ i: i, ms: ok ? dt : 999999 });
+            await this.sleep(60);
+        }
+        results.sort((a, b) => a.ms - b.ms);
+        this._lineOrder = results.map((r) => r.i);
+        let best = Lizimh.lines[this._lineOrder[0]];
+        console.log("[lizimh] 线路测速: " + results.map((r) =>
+            Lizimh.lines[r.i].name + "=" + (r.ms > 900000 ? "超时" : r.ms + "ms")).join(", ")
+            + " → 选用 " + best.name);
+    }
+
+    // 圖片加載失敗時, 換下一條線重試同一張圖
+    nextLineUrl(url) {
+        let path = this._imgPath[url];
+        if (!path) {
+            let m = String(url).match(/^https?:\/\/[^/]+(\/.*)$/);
+            path = m ? m[1] : null;
+        }
+        if (!path) return null;
+        let cur = this._imgLine[url];
+        if (cur === undefined) cur = this.currentLine();
+        let order = this._lineOrder || Lizimh.lines.map((_, i) => i);
+        let pos = order.indexOf(cur);
+        for (let k = 1; k <= order.length; k++) {
+            let nxt = order[(pos + k) % order.length];
+            if (nxt === cur) continue;
+            let nu = Lizimh.lines[nxt].url + path;
+            this._imgLine[nu] = nxt;
+            this._imgPath[nu] = path;
+            return nu;
+        }
+        return null;
     }
 
     parseComic(c) {
@@ -151,6 +216,20 @@ class Lizimh extends ComicSource {
                 }
             }
             if (lines.length) Lizimh.lines = lines;
+            // 依服務端線路重建設置項 (保留 auto)
+            let opts = [{ value: "auto", text: "自动测速 (推荐)" }];
+            for (let i = 0; i < Lizimh.lines.length; i++) {
+                opts.push({ value: String(i), text: Lizimh.lines[i].name });
+            }
+            try {
+                this.settings.imageLine.options = opts;
+            } catch (e) {}
+            // auto 模式: 測速選最快
+            let mode = "auto";
+            try { mode = this.loadSetting("imageLine") || "auto"; } catch (e) {}
+            if (mode === "auto") {
+                try { await this.speedTest(); } catch (e) {}
+            }
             this.category = {
                 title: "栗子漫画",
                 parts: [
@@ -200,6 +279,8 @@ class Lizimh extends ComicSource {
 
     // 章節封面快取: comicId -> {chapterId: coverPath}
     _coverCache = {};
+    // 章節頁數快取: dir -> pageCount
+    _pageCache = {};
 
     async chapterCovers(comicId) {
         if (this._coverCache[comicId]) return this._coverCache[comicId];
@@ -236,6 +317,12 @@ class Lizimh extends ComicSource {
             }
             throw new Error("图片线路限速中, 请稍后重试或切换线路");
         };
+        if (this._pageCache[dir]) {
+            let n = this._pageCache[dir];
+            let out = [];
+            for (let i = 1; i <= n; i++) out.push(url(i));
+            return out;
+        }
         let lo = Math.max(1, Math.min(coverPage || 1, maxPages));
         if (!(await exists(lo))) return [];
         await this.sleep(100);
@@ -249,6 +336,7 @@ class Lizimh extends ComicSource {
             await this.sleep(80);
             if (await exists(mid)) lo = mid; else hi = mid;
         }
+        this._pageCache[dir] = lo;
         let images = [];
         for (let i = 1; i <= lo; i++) images.push(url(i));
         return images;
@@ -299,10 +387,24 @@ class Lizimh extends ComicSource {
             try { maxPages = parseInt(this.loadSetting("maxPages") || "300"); } catch (e) {}
             let images = await this.probePages(dir, ext, maxPages, coverPage);
             if (!images.length) throw new Error("该章节图片探测失败");
+            let line = this.currentLine();
+            for (let u of images) {
+                this._imgLine[u] = line;
+                this._imgPath[u] = u.substring(Lizimh.lines[line].url.length);
+            }
             return { images: images };
         },
 
-        onImageLoad: (url, comicId, epId) => { return {}; },
+        onImageLoad: (url, comicId, epId) => {
+            let self = this;
+            return {
+                onLoadFailed: () => {
+                    let alt = self.nextLineUrl(url);
+                    if (!alt) return undefined;
+                    return { url: alt };
+                },
+            };
+        },
         onThumbnailLoad: (url) => { return {}; },
     };
 }
