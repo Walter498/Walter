@@ -1,7 +1,7 @@
 /** @type {import('./_venera_.js')} */
 
 /**
- * 栗子漫画 (lizimh) 源  v2.6.0
+ * 栗子漫画 (lizimh) 源  v2.7.0
  *
  * API:   http://ai.qsmm.fun      (配置 AES-ECB 解出, 無需簽名)
  * 圖片:  多條線路可選 (配置下發 generators)
@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.6.0";
+    version = "2.7.0";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -318,71 +318,57 @@ class Lizimh extends ComicSource {
     }
 
     // 由 cover 路徑推導同目錄下的全部頁面
-    //  策略: 以封面頁碼 lo 為下界 -> 並行指數跳躍找上界 -> 並行二分收斂
-    //  小章節通常 1~2 輪來回, 大章節 3~4 輪
+    //  優化要點 (實測):
+    //   1. GET + Range: 單次 ~116ms, 遠快於 HEAD 的 ~560ms
+    //   2. 並行上限 6 (HTTP/1.1 每主機連接數): 超過會排隊反而變慢
+    //   3. 先按 1,2,4,8,16,32 跨度並行探一次夾出區間, 再在區間內並行細分
     async probePages(dir, ext, maxPages, coverPage, hint) {
         const url = (i) => this.lineUrl() + dir + "/" + i + "." + ext;
-        const headers = { "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148" };
+        const headers = {
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+            "Range": "bytes=0-0",
+        };
+        const LIMIT = 6;
+        // 單頁存在性: GET + Range, 200/206 = 存在, 404 = 不存在
         const exists = async (i) => {
             for (let attempt = 0; attempt < 3; attempt++) {
                 try {
-                    let res = await Network.sendRequest("HEAD", url(i), headers);
-                    if (res.status === 200) return true;
+                    let res = await Network.sendRequest("GET", url(i), headers);
+                    if (res.status === 200 || res.status === 206) return true;
                     if (res.status === 404 || res.status === 403 || res.status === 400) return false;
-                    if (res.status === 429 || res.status === 503) { await this.sleep(250 * (attempt + 1)); continue; }
+                    if (res.status === 429 || res.status === 503) { await this.sleep(200 * (attempt + 1)); continue; }
                     return null;
-                } catch (e) { await this.sleep(120 * (attempt + 1)); }
+                } catch (e) { await this.sleep(100 * (attempt + 1)); }
             }
             return null;
+        };
+        // 分批並行 (最多 LIMIT 個同時)
+        const probeAll = async (idxs) => {
+            let out = [];
+            for (let i = 0; i < idxs.length; i += LIMIT) {
+                let chunk = idxs.slice(i, i + LIMIT);
+                let r = await Promise.all(chunk.map((x) => exists(x)));
+                out = out.concat(r);
+                if (r.some((x) => x === false)) break;   // 已找到邊界, 不必再掃
+            }
+            return out;
         };
         const build = (n) => { let o = []; for (let i = 1; i <= n; i++) o.push(url(i)); return o; };
 
         if (this._pageCache[dir]) return build(this._pageCache[dir]);
 
         let lo = Math.max(1, Math.min(coverPage || 1, maxPages));
-        // 若有同漫畫已知頁數, 先在其附近並行掃 (連續章節頁數通常接近)
-        if (hint && hint > lo + 1 && hint <= maxPages) {
-            const hs = [];
-            for (let i = Math.max(lo + 1, hint - 6); i <= Math.min(maxPages, hint + 12); i++) hs.push(i);
-            const hr = await Promise.all(hs.map((i) => exists(i)));
-            let hstop = -1;
-            for (let k = 0; k < hs.length; k++) { if (hr[k] === false) { hstop = k; break; } }
-            if (hstop >= 0) {
-                lo = hs[hstop] - 1;
-                this._pageCache[dir] = lo;
-                this.persistPages();
-                return build(lo);
-            }
-            if (!hr.some((x) => x === null)) lo = hs[hs.length - 1];
-        }
-        // 第一輪: 一次性並行掃 lo+1 .. lo+24 (絕大多數章節在此輪命中)
-        const SWEEP = 24;
-        let ids = [];
-        for (let i = lo + 1; i <= lo + SWEEP && i <= maxPages; i++) ids.push(i);
-        if (ids.length) {
-            const r = await Promise.all(ids.map((i) => exists(i)));
-            let stop = -1;
-            for (let k = 0; k < ids.length; k++) { if (r[k] === false) { stop = k; break; } }
-            if (stop >= 0) {
-                lo = ids[stop] - 1;
-                this._pageCache[dir] = lo;
-                this.persistPages();
-                return build(lo);
-            }
-            if (!r.some((x) => x === null)) lo = ids[ids.length - 1];
-        }
+        // 用同漫畫已知頁數作為額外下界參考
+        if (hint && hint > lo && hint <= maxPages) lo = Math.min(hint, maxPages);
 
-        // 第二輪: 並行指數跳躍找上界
+        // 第一輪: 跨度 1,2,4,8,16,32 並行探, 一次夾出上界
         let hi = null;
-        let K = SWEEP;
-        while (hi === null && lo + 1 <= maxPages) {
+        let span = 1;
+        while (hi === null && lo + span <= maxPages + 1) {
             const probes = [];
-            for (let k = K + 1; k <= Math.min(K * 32, maxPages) && probes.length < 8; k *= 2) {
-                const t = Math.min(lo + k, maxPages);
-                if (t > lo) probes.push(t);
-            }
+            for (let k = span, n = 0; n < LIMIT && lo + k <= maxPages; k *= 2, n++) probes.push(lo + k);
             if (!probes.length) break;
-            const res = await Promise.all(probes.map((t) => exists(t)));
+            const res = await probeAll(probes);
             let idx = -1;
             for (let k = 0; k < probes.length; k++) { if (res[k] === false) { idx = k; break; } }
             if (idx >= 0) {
@@ -391,27 +377,29 @@ class Lizimh extends ComicSource {
             } else {
                 if (res.some((x) => x === null)) break;
                 lo = probes[probes.length - 1];
-                K *= 2;
+                span *= 2;
             }
         }
         if (hi === null) hi = Math.min(lo + 1, maxPages + 1);
 
-        // 第三輪: 並行二分收斂
+        // 第二輪: 區間內並行細分 (每批 6 個)
         let guard = 0;
-        while (hi - lo > 1 && guard++ < 30) {
+        while (hi - lo > 1 && guard++ < 20) {
             const mids = [];
-            const step = Math.max(1, Math.floor((hi - lo) / 4));
-            for (let m = lo + step; m < hi; m += step) mids.push(m);
+            const step = Math.max(1, Math.floor((hi - lo) / (LIMIT + 1)));
+            for (let m = lo + step; m < hi && mids.length < LIMIT; m += step) mids.push(m);
             if (!mids.length) break;
             const res = await Promise.all(mids.map((m) => exists(m)));
-            let newLo = lo, newHi = hi;
+            let nl = lo, nh = hi;
             for (let k = 0; k < mids.length; k++) {
-                if (res[k] === true) newLo = Math.max(newLo, mids[k]);
-                else newHi = Math.min(newHi, mids[k]);
+                if (res[k] === true) nl = Math.max(nl, mids[k]);
+                else if (res[k] === false) nh = Math.min(nh, mids[k]);
             }
-            if (newLo === lo && newHi === hi) { newHi = lo + step; break; }
-            lo = newLo; hi = newHi;
+            if (nl === lo && nh === hi) break;
+            lo = nl; hi = nh;
         }
+
+        if (lo < 1) lo = 1;
         this._pageCache[dir] = lo;
         this.persistPages();
         return build(lo);
@@ -431,7 +419,7 @@ class Lizimh extends ComicSource {
             let m = String(cov).match(/^(.*)\/(\d+)\.([A-Za-z0-9]+)$/);
             if (!m) return;
             let dir = m[1], ext = m[3], coverPage = parseInt(m[2]) || 1;
-            if (this._pageCache[dir]) return;   // 已有資料
+            if (this._pageCache[dir]) return;
             let hint = this._lastCount[String(comicId)] || 0;
             let maxPages = 300;
             try { maxPages = parseInt(this.loadSetting("maxPages") || "300"); } catch (e) {}
