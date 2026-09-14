@@ -2,58 +2,56 @@
 
 栗子漫画 (lizimh) 的 EZvenera 漫画源插件。
 
-## 状态: ✅ 可用
+## 状态: ✅ 可用 (v2.0.0, 适配 2026-09 新版)
 
-| 组件 | 状态 |
-|---|---|
-| API 基址 | ✅ `http://ai.qsmm.fun` (AES-ECB 解密远程配置获得) |
-| 签名 | ✅ 无需 lzsign, 服务器不校验 |
-| 图片 CDN | ✅ `https://cf-1.imgio.club` (无 referer 限制) |
-| 搜索 | ✅ `/app/api/search/full?q=` |
-| 详情+章节 | ✅ `/app/api/detail/{id}` `/app/api/chapter/{epId}` |
-| 排行 | ✅ `/app/api/rank/list` |
-
-## 安装
-
-EZvenera → 源管理 → 输入:
 ```
 https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js
 ```
 
-## 破解过程 (2026-09-13)
+## 新版 (2026-09) 发生了什么
 
-1. 官网下载页提取安卓 APK, 其 libapp.so 与 iOS 版 snapshot hash 相同 (80a49c71...)
-2. 用 `strings` 提取 libapp.so 全部 1.9 万条字符串
-3. 对腾讯 COS 上的 AES 加密配置做广谱爆破:
-   - 每字符串派生 6 种密钥形态 (原始/UTF-16/MD5/SHA256×2)
-   - 共 11.9 万密钥 × ECB/CBC
-4. 命中: 字符串 `f8d992c74b29491d8a3e3fd5f07389d8` 的 **32 字节 ASCII 形式** 作 AES-256-ECB 密钥
-5. 配置明文: `{"domain":"http://ai.qsmm.fun/"}`
-6. 实测该域名的 v1 API 全部可用且 **lzsign 不校验**
+| 项目 | 变化 |
+|---|---|
+| 配置文件 | 未变 (密文+密鑰仍可解密, `ai.qsmm.fun`) |
+| 搜索/详情/分类/排行 | 仍开放, 无签名 |
+| 章节接口 v1/v2 | **返回诱饵数据** (那张「当前版本已无法使用」公告图) |
+| 章节接口 v3 | 需要登录 JWT + **观看广告换阅读时间** (`401 无权限` / `4001 阅读时间不足`) |
 
-## 接口备忘
+## 本源的绕过方式
 
-```text
-GET /app/api/search/full?q=<kw>     → data.search_full[]
-GET /app/api/search/suggest?q=<kw>  → data.search_suggest[]
-GET /app/api/detail/<comicId>       → data.chapters[] (id/name/order)
-GET /app/api/chapter/<chapterId>    → data.pics[] (路径, 拼 cf-1.imgio.club)
-GET /app/api/rank/list              → data.rank_list[].comic_list[]
-GET /app/api/home/data              → 首页推荐
-GET /app/api/home/tab/data?tag=<t>  → 分类标签页 (需 tag 参数)
-GET /app/api/category/list          → 分类漫画
-GET /app/api/config                 → 广告/线路配置
+`/app/api/v2/detail/{id}` (未加固) 返回的每个章节都带 `cover` 路径:
+
+```
+/101/59726/dfacc2f78bf8e1af/2249c545/97.webp
+                └─ 目录 ─────────┘  └页┘
 ```
 
-响应统一格式: `{"code":201,"data":{...}}`, code!=201 即失败。
+同目录下 `1.ext ~ N.ext` **全部可直接访问**(cdn.lzimg.xyz 等图床), 无需签名/登录/阅读时间。
 
-注意: API 走 **明文 HTTP**, 配置可能再轮换; 若失效重新拉 COS 配置用同密钥解密即可。
+所以: 取 cover 推目录 → 以封面页号为下界做指数+二分探测 → 拼出全部图片 URL。
+实测一章 71 页仅需约 12 次 HEAD 请求。
+
+## 已实测 (端到端)
+
+```text
+搜索「重生」        → 100 条
+详情 59726          → 506 章, 标签/评分正常
+末章 2480309        → 71 页, 首末页均 206 可下载
+排行                → 96 条
+```
+
+## 注意事项
+
+- 图床有**限速 (429)**: 探测已内置退避重试; 若正文加载失败提示限速, 换设置里的其他线路或稍后重试
+- 图片线路 5 条 (服务端配置下发), 可在源设置里切换
+- 配置密文轮换时, 用 `config/fetch_config.py` 重新解密取新基址
 
 ## 目录
 
 ```text
-lizimh.js              EZvenera 插件成品
-tools/crack_sign.py    lzsign 破解器 (最终未需要——服务端不校验)
-tools/ssl_dump.js      Frida SSL 抓取脚本 (最终未需要)
-tools/keycands.txt     密钥候选表
+lizimh.js              EZvenera 插件 v2.0.0
+config/fetch_config.py 配置拉取+解密 (AES-256-ECB)
+config/fetch_config.sh openssl 版本
+config/config_decrypted.json 当前配置明文
+tools/                 早前抓包/破解工具 (已不需要)
 ```
