@@ -1,7 +1,7 @@
 /** @type {import('./_venera_.js')} */
 
 /**
- * 栗子漫画 (lizimh) 源  v2.5.0
+ * 栗子漫画 (lizimh) 源  v2.6.0
  *
  * API:   http://ai.qsmm.fun      (配置 AES-ECB 解出, 無需簽名)
  * 圖片:  多條線路可選 (配置下發 generators)
@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.5.0";
+    version = "2.6.0";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -280,6 +280,10 @@ class Lizimh extends ComicSource {
 
     // 章節封面快取: comicId -> {chapterId: coverPath}
     _coverCache = {};
+    // 章節順序: comicId -> [chapterId...]
+    _orderCache = {};
+    // 同漫畫最近一次探測到的頁數 (作為提示)
+    _lastCount = {};
     // 章節頁數快取: dir -> pageCount (記憶體)
     _pageCache = {};
 
@@ -316,7 +320,7 @@ class Lizimh extends ComicSource {
     // 由 cover 路徑推導同目錄下的全部頁面
     //  策略: 以封面頁碼 lo 為下界 -> 並行指數跳躍找上界 -> 並行二分收斂
     //  小章節通常 1~2 輪來回, 大章節 3~4 輪
-    async probePages(dir, ext, maxPages, coverPage) {
+    async probePages(dir, ext, maxPages, coverPage, hint) {
         const url = (i) => this.lineUrl() + dir + "/" + i + "." + ext;
         const headers = { "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148" };
         const exists = async (i) => {
@@ -336,6 +340,21 @@ class Lizimh extends ComicSource {
         if (this._pageCache[dir]) return build(this._pageCache[dir]);
 
         let lo = Math.max(1, Math.min(coverPage || 1, maxPages));
+        // 若有同漫畫已知頁數, 先在其附近並行掃 (連續章節頁數通常接近)
+        if (hint && hint > lo + 1 && hint <= maxPages) {
+            const hs = [];
+            for (let i = Math.max(lo + 1, hint - 6); i <= Math.min(maxPages, hint + 12); i++) hs.push(i);
+            const hr = await Promise.all(hs.map((i) => exists(i)));
+            let hstop = -1;
+            for (let k = 0; k < hs.length; k++) { if (hr[k] === false) { hstop = k; break; } }
+            if (hstop >= 0) {
+                lo = hs[hstop] - 1;
+                this._pageCache[dir] = lo;
+                this.persistPages();
+                return build(lo);
+            }
+            if (!hr.some((x) => x === null)) lo = hs[hs.length - 1];
+        }
         // 第一輪: 一次性並行掃 lo+1 .. lo+24 (絕大多數章節在此輪命中)
         const SWEEP = 24;
         let ids = [];
@@ -398,6 +417,28 @@ class Lizimh extends ComicSource {
         return build(lo);
     }
 
+    // 後台預探下一章的頁數 (讓翻下一話秒開)
+    async prefetchNext(comicId, epId) {
+        try {
+            let order = this._orderCache[String(comicId)];
+            if (!order) return;
+            let idx = order.indexOf(String(epId));
+            if (idx < 0 || idx + 1 >= order.length) return;
+            let nextId = order[idx + 1];
+            let covers = this._coverCache[String(comicId)] || {};
+            let cov = covers[nextId];
+            if (!cov) return;
+            let m = String(cov).match(/^(.*)\/(\d+)\.([A-Za-z0-9]+)$/);
+            if (!m) return;
+            let dir = m[1], ext = m[3], coverPage = parseInt(m[2]) || 1;
+            if (this._pageCache[dir]) return;   // 已有資料
+            let hint = this._lastCount[String(comicId)] || 0;
+            let maxPages = 300;
+            try { maxPages = parseInt(this.loadSetting("maxPages") || "300"); } catch (e) {}
+            await this.probePages(dir, ext, maxPages, coverPage, hint);
+        } catch (e) {}
+    }
+
     sleep(ms) {
         return new Promise((resolve) => setTimeout(resolve, ms));
     }
@@ -408,11 +449,14 @@ class Lizimh extends ComicSource {
             let chapters = {};
             let covers = {};
             let list = (data.chapters || []).slice().sort((a, b) => a.order - b.order);
+            let order = [];
             for (let ch of list) {
                 chapters[String(ch.id)] = ch.name || `第${ch.order}话`;
                 if (ch.cover) covers[String(ch.id)] = ch.cover;
+                order.push(String(ch.id));
             }
             this._coverCache[String(id)] = covers;
+            this._orderCache[String(id)] = order;
             let lastIso = list.length ? list[list.length - 1].created_at : "";
             let tags = {
                 "作者": (data.author || "").split(",").filter((t) => t),
@@ -442,7 +486,14 @@ class Lizimh extends ComicSource {
             let dir = m[1], ext = m[3], coverPage = parseInt(m[2]) || 1;
             let maxPages = 300;
             try { maxPages = parseInt(this.loadSetting("maxPages") || "300"); } catch (e) {}
-            let images = await this.probePages(dir, ext, maxPages, coverPage);
+            let hint = this._lastCount[String(comicId)] || 0;
+            let images = await this.probePages(dir, ext, maxPages, coverPage, hint);
+            this._lastCount[String(comicId)] = images.length;
+            // 後台預探下一章 (不阻塞當前返回)
+            try {
+                let self = this;
+                setTimeout(() => { self.prefetchNext(comicId, epId); }, 400);
+            } catch (e) {}
             if (!images.length) throw new Error("该章节图片探测失败");
             let line = this.currentLine();
             for (let u of images) {
