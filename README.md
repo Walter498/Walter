@@ -55,3 +55,16 @@ config/fetch_config.sh openssl 版本
 config/config_decrypted.json 当前配置明文
 tools/                 早前抓包/破解工具 (已不需要)
 ```
+
+## v2.3.0 更新 (帳號令牌秒開)
+
+實測發現：`chapter/v3` 接口**不校驗簽名**（假簽名也通過），唯一門檻是：
+1. `Authorization: <JWT>` 用戶令牌
+2. 服務端記錄的「閱讀時間」（在官方 App 看廣告獲取，每天 3 次）
+
+所以：
+- 在源設置填「账号令牌」→ 有閱讀時間時走 v3 一次請求秒開章節
+- 沒有令牌或閱讀時間用完 → 自動回退到封面推導（一直可用）
+- 詳情頁會顯示剩餘閱讀時間
+
+令牌取法（越獄設備）：Filza → 栗子漫畫沙盒 → `Library/Preferences/com.lizimh.app.plist` → `flutter.auth`

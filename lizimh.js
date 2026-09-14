@@ -1,7 +1,7 @@
 /** @type {import('./_venera_.js')} */
 
 /**
- * 栗子漫画 (lizimh) 源  v2.2.0
+ * 栗子漫画 (lizimh) 源  v2.3.0
  *
  * API:   http://ai.qsmm.fun      (配置 AES-ECB 解出, 無需簽名)
  * 圖片:  多條線路可選 (配置下發 generators)
@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.2.0";
+    version = "2.3.0";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -44,6 +44,12 @@ class Lizimh extends ComicSource {
                 { value: "3", text: "备用 (cf-1.imgio.club)" },
             ],
             default: "auto",
+        },
+        authToken: {
+            title: "账号令牌 (可选, 填了可秒开章节)",
+            type: "input",
+            validator: null,
+            default: "",
         },
         maxPages: {
             title: "单章最大页数 (探测上限)",
@@ -313,6 +319,36 @@ class Lizimh extends ComicSource {
         return map;
     }
 
+    authToken() {
+        try { return (this.loadSetting("authToken") || "").trim(); } catch (e) { return ""; }
+    }
+
+    // 讀取時間狀態 (服務端)
+    async readingReward() {
+        let tk = this.authToken();
+        if (!tk) return null;
+        try {
+            let res = await Network.get(Lizimh.api + "/app/api/ad/reward/progress", { "Authorization": tk });
+            if (res.status !== 200) return null;
+            let j = JSON.parse(res.body);
+            return j.code === 201 ? j.data : null;
+        } catch (e) { return null; }
+    }
+
+    // 用帳號令牌直取章節圖片 (v3 接口, 一次請求拿全部圖片)
+    async loadEpV3(epId) {
+        let tk = this.authToken();
+        if (!tk) return null;
+        let res = await Network.get(
+            Lizimh.api + "/app/api/chapter/v3/" + epId,
+            { "Authorization": tk, "Accept": "application/json" }
+        );
+        if (res.status !== 200) return null;
+        let j = JSON.parse(res.body);
+        if (j.code !== 201 || !j.data || !j.data.pics || !j.data.pics.length) return null;
+        return j.data.pics.map((p) => this.abs(p));
+    }
+
     // 由 cover 路徑推導同目錄下的全部頁面
     //  - coverPage: 封面本身是該章的一頁, 可作為頁數下界
     //  - CDN 有限速(429), 逐次探測都要退避重試
@@ -385,6 +421,15 @@ class Lizimh extends ComicSource {
                 "状态": [Lizimh.statusByLastUpdate(lastIso)],
             };
             if (data.score && Number(data.score) > 0) tags["评分"] = ["评分" + data.score];
+            // 有令牌時顯示閱讀時間狀態
+            try {
+                let rw = await this.readingReward();
+                if (rw) {
+                    let sec = Number(rw.remaining_seconds || 0);
+                    if (sec > 0) tags["阅读时间"] = [Math.floor(sec / 60) + " 分钟"];
+                    else tags["阅读时间"] = ["已用完 (App内看广告可续)"];
+                }
+            } catch (e) {}
             return new ComicDetails({
                 title: data.name || "",
                 cover: this.abs(data.picY || data.picX),
@@ -397,6 +442,11 @@ class Lizimh extends ComicSource {
         },
 
         loadEp: async (comicId, epId) => {
+            // 有令牌時優先用 v3 接口 (一次請求, 秒開)
+            try {
+                let fast = await this.loadEpV3(epId);
+                if (fast && fast.length) return { images: fast };
+            } catch (e) {}
             let covers = await this.chapterCovers(comicId);
             let cover = covers[String(epId)];
             if (!cover) throw new Error("找不到该章节的图片路径");
