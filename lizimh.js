@@ -1,7 +1,7 @@
 /** @type {import('./_venera_.js')} */
 
 /**
- * 栗子漫画 (lizimh) 源  v2.1.0
+ * 栗子漫画 (lizimh) 源  v2.2.0
  *
  * API:   http://ai.qsmm.fun      (配置 AES-ECB 解出, 無需簽名)
  * 圖片:  多條線路可選 (配置下發 generators)
@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.1.0";
+    version = "2.2.0";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -201,6 +201,7 @@ class Lizimh extends ComicSource {
     }
 
     async init() {
+        this.loadPersistedPages();
         try {
             let data = await Lizimh.getJson("/app/api/configv2");
             let g = data.cfg_general || {};
@@ -279,8 +280,27 @@ class Lizimh extends ComicSource {
 
     // 章節封面快取: comicId -> {chapterId: coverPath}
     _coverCache = {};
-    // 章節頁數快取: dir -> pageCount
+    // 章節頁數快取: dir -> pageCount (記憶體)
     _pageCache = {};
+
+    // 持久化快取 (跨啟動), 用宿主的 saveData/loadData
+    persistPages() {
+        try {
+            let obj = {};
+            let n = 0;
+            for (let k in this._pageCache) { obj[k] = this._pageCache[k]; n++; if (n > 800) break; }
+            this.saveData("pageCounts", JSON.stringify(obj));
+        } catch (e) {}
+    }
+    loadPersistedPages() {
+        try {
+            let raw = this.loadData("pageCounts");
+            if (raw) {
+                let obj = JSON.parse(raw);
+                for (let k in obj) this._pageCache[k] = obj[k];
+            }
+        } catch (e) {}
+    }
 
     async chapterCovers(comicId) {
         if (this._coverCache[comicId]) return this._coverCache[comicId];
@@ -337,6 +357,7 @@ class Lizimh extends ComicSource {
             if (await exists(mid)) lo = mid; else hi = mid;
         }
         this._pageCache[dir] = lo;
+        this.persistPages();
         let images = [];
         for (let i = 1; i <= lo; i++) images.push(url(i));
         return images;
