@@ -1,7 +1,7 @@
 /** @type {import('./_venera_.js')} */
 
 /**
- * 栗子漫画 (lizimh) 源  v2.11.0
+ * 栗子漫画 (lizimh) 源  v2.11.1
  *
  * API:   http://ai.qsmm.fun      (配置 AES-ECB 解出, 無需簽名)
  * 圖片:  多條線路可選 (配置下發 generators)
@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.11.0";
+    version = "2.11.1";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -290,6 +290,7 @@ class Lizimh extends ComicSource {
 
     async init() {
         this.loadPersistedPages();
+        this.loadPersistedVerified();
         try {
             let data = await Lizimh.getJson("/app/api/configv2");
             let g = data.cfg_general || {};
@@ -381,6 +382,9 @@ class Lizimh extends ComicSource {
     // 章節頁數快取: dir -> pageCount (記憶體)
     _pageCache = {};
 
+    // 已逐頁校驗過的章節: dir -> [有效頁碼]（下載/二次閱讀用，避免缺頁導致 404）
+    _verified = {};
+
     // 持久化快取 (跨啟動), 用宿主的 saveData/loadData
     persistPages() {
         try {
@@ -390,6 +394,16 @@ class Lizimh extends ComicSource {
             this.saveData("pageCounts", JSON.stringify(obj));
         } catch (e) {}
     }
+    loadPersistedVerified() {
+        try {
+            let raw = this.loadData("verifiedPages");
+            if (raw) {
+                let obj = JSON.parse(raw);
+                for (let k in obj) this._verified[k] = obj[k];
+            }
+        } catch (e) {}
+    }
+
     loadPersistedPages() {
         try {
             let raw = this.loadData("pageCounts");
@@ -449,7 +463,14 @@ class Lizimh extends ComicSource {
         };
         const build = (n) => { let o = []; for (let i = 1; i <= n; i++) o.push(url(i)); return o; };
 
-        if (this._pageCache[dir]) return build(this._pageCache[dir]);
+        if (this._verified[dir] && this._verified[dir].length) {
+            return this._verified[dir].map((i) => url(i));
+        }
+        if (this._pageCache[dir]) {
+            // 先用快速清單回應（不阻塞），同時後台校驗全章頁碼
+            this.scheduleVerify(dir, ext, this._pageCache[dir]);
+            return build(this._pageCache[dir]);
+        }
 
         let lo = Math.max(1, Math.min(coverPage || 1, maxPages));
         // 用同漫畫已知頁數作為額外下界參考
@@ -513,9 +534,61 @@ class Lizimh extends ComicSource {
         } catch (e) {}
         this._pageCache[dir] = lo;
         this.persistPages();
+        this.scheduleVerify(dir, ext, lo);
         let imgs = [];
         for (let i of valid) imgs.push(url(i));
         return imgs;
+    }
+
+    scheduleVerify(dir, ext, total) {
+        if (this._verified[dir]) return;
+        let self = this;
+        try {
+            setTimeout(() => {
+                self.verifyAllPages(dir, ext, total);
+            }, 700);
+        } catch (e) {}
+    }
+
+    // 逐頁並行校驗（6 並行），剔除不存在的頁並寫入快取
+    async verifyAllPages(dir, ext, total) {
+        try {
+            const headers = {
+                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+                "Range": "bytes=0-0",
+            };
+            let valid = [];
+            const B = 6;
+            for (let start = 1; start <= total; start += B) {
+                const chunk = [];
+                for (let i = start; i < start + B && i <= total; i++) chunk.push(i);
+                const res = await Promise.all(
+                    chunk.map(async (i) => {
+                        try {
+                            let r = await Network.sendRequest("GET", this.lineAbs(dir + "/" + i + "." + ext), headers);
+                            return r.status === 200 || r.status === 206;
+                        } catch (e) {
+                            return false;
+                        }
+                    })
+                );
+                for (let k = 0; k < chunk.length; k++) if (res[k]) valid.push(chunk[k]);
+                await this.sleep(40);
+            }
+            this._verified[dir] = valid;
+            this.persistVerified();
+            if (valid.length !== total) {
+                console.log("[lizimh] 校驗 " + dir + " → " + valid.length + "/" + total + " 頁存在（已剔除缺頁）");
+            }
+        } catch (e) {}
+    }
+
+    persistVerified() {
+        try {
+            let n = 0, obj = {};
+            for (let k in this._verified) { obj[k] = this._verified[k]; if (++n > 60) break; }
+            this.saveData("verifiedPages", JSON.stringify(obj));
+        } catch (e) {}
     }
 
     // 後台預探下一章的頁數 (讓翻下一話秒開)
