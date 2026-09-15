@@ -1,7 +1,7 @@
 /** @type {import('./_venera_.js')} */
 
 /**
- * 栗子漫画 (lizimh) 源  v2.18.0
+ * 栗子漫画 (lizimh) 源  v2.19.0
  *
  * API:   http://ai.qsmm.fun      (配置 AES-ECB 解出, 無需簽名)
  * 圖片:  多條線路可選 (配置下發 generators)
@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.18.0";
+    version = "2.19.0";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -73,19 +73,39 @@ class Lizimh extends ComicSource {
             type: "multiPartPage",
             load: async (page) => {
                 let parts = [];
-                // ① 首页推荐 = 精选国漫（源站首页分组里带「国漫」的那一组）
+                // ① 首页推荐：精選國漫 + 系統/穿越/玄幻 三種題材，合成一個大池子。
+                // 宿主首頁只顯示 6 本，「换一换」從整個池子裡抽 → 種類才夠多。
                 try {
-                    let home = await Lizimh.getJson("/app/api/home/data");
-                    let groups = home.home_content_list || [];
-                    let pick = null;
-                    for (let g of groups) {
-                        let t = String(g.title || "");
-                        if (t.indexOf("国漫") >= 0) { pick = g; break; }
+                    let pool = [];
+                    let seen = {};
+                    let add = (c) => {
+                        let id = String(c.id || "");
+                        if (!id || seen[id]) return;
+                        seen[id] = 1;
+                        pool.push(c);
+                    };
+                    try {
+                        let home = await Lizimh.getJson("/app/api/home/data");
+                        for (let g of home.home_content_list || []) {
+                            let t = String(g.title || "");
+                            if (t.indexOf("国漫") >= 0) {
+                                for (let c of g.comic_list || []) add(c);
+                            }
+                        }
+                    } catch (e) {}
+                    for (let tag of ["系统", "穿越", "玄幻"]) {
+                        try {
+                            let res = await Lizimh.getJson(
+                                "/app/api/search/full?q=" + encodeURIComponent(tag) + "&page=1"
+                            );
+                            for (let c of res.search_full || []) add(c);
+                        } catch (e) {}
                     }
-                    if (!pick && groups.length) pick = groups[0];
-                    if (pick) {
-                        let comics = (pick.comic_list || []).map((c) => this.parseComic(c, "desc"));
-                        if (comics.length) parts.push({ title: "首页推荐", comics: comics });
+                    if (pool.length) {
+                        parts.push({
+                            title: "首页推荐",
+                            comics: pool.map((c) => this.parseComic(c, "desc")),
+                        });
                     }
                 } catch (e) {}
                 // ② 周期更新：按 updatedAt 算出「星期几更新」，分到周一~周日
