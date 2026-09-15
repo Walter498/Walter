@@ -1,7 +1,7 @@
 /** @type {import('./_venera_.js')} */
 
 /**
- * 栗子漫画 (lizimh) 源  v2.21.0
+ * 栗子漫画 (lizimh) 源  v2.22.0
  *
  * API:   http://ai.qsmm.fun      (配置 AES-ECB 解出, 無需簽名)
  * 圖片:  多條線路可選 (配置下發 generators)
@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.21.0";
+    version = "2.22.0";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -560,10 +560,23 @@ class Lizimh extends ComicSource {
         if (this._verified[dir] && this._verified[dir].length) {
             return this._verified[dir].slice();
         }
-        if (this._pageCache[dir]) {
-            // 先用快速清單回應（不阻塞），同時後台校驗全章頁碼
-            this.scheduleVerify(dir, ext, this._pageCache[dir]);
-            return build(this._pageCache[dir]);
+        if (this._pageCache[dir] && !this._verified[dir]) {
+            // 快取只當「起點」，回傳前一定要驗證：
+            // 舊版探測曾把 CDN 的 82 字節佔位圖當成真圖，偏大的頁數已被
+            // 持久化 → 直接回傳就會給出「超出真實結尾」的頁面 → 下載 404
+            // （閱讀器有 fallback 能忍，下載器一錯就整條失敗）。
+            const cached = this._pageCache[dir];
+            const lastOk = await exists(cached);
+            if (lastOk === true) {
+                const nextGone = await exists(cached + 1);
+                if (nextGone === false) {
+                    this._verified[dir] = build(cached);
+                    this._pageCache[dir] = cached;
+                    return this._verified[dir].slice();
+                }
+            }
+            // 校驗不通過：丟掉舊快取，走完整探測
+            delete this._pageCache[dir];
         }
 
         let lo = Math.max(1, Math.min(coverPage || 1, maxPages));
