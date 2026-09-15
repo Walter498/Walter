@@ -1,7 +1,7 @@
 /** @type {import('./_venera_.js')} */
 
 /**
- * 栗子漫画 (lizimh) 源  v2.8.0
+ * 栗子漫画 (lizimh) 源  v2.9.0
  *
  * API:   http://ai.qsmm.fun      (配置 AES-ECB 解出, 無需簽名)
  * 圖片:  多條線路可選 (配置下發 generators)
@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.8.0";
+    version = "2.9.0";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -501,6 +501,7 @@ class Lizimh extends ComicSource {
             let data = await Lizimh.getJson(`/app/api/v2/detail/${id}`);
             let chapters = {};
             let covers = {};
+            let chapterCovers = {};
             let list = (data.chapters || []).slice().sort((a, b) => a.order - b.order);
             let order = [];
             for (let ch of list) {
@@ -524,6 +525,7 @@ class Lizimh extends ComicSource {
                 description: data.content || "",
                 tags: tags,
                 chapters: chapters,
+                chapterCovers: chapterCovers,
                 stars: data.score ? Number(data.score) : null,
                 updateTime: lastIso ? Lizimh.fmtDate(lastIso) : null,
             });
