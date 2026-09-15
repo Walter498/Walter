@@ -1,7 +1,7 @@
 /** @type {import('./_venera_.js')} */
 
 /**
- * 栗子漫画 (lizimh) 源  v2.16.0
+ * 栗子漫画 (lizimh) 源  v2.17.0
  *
  * API:   http://ai.qsmm.fun      (配置 AES-ECB 解出, 無需簽名)
  * 圖片:  多條線路可選 (配置下發 generators)
@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.16.0";
+    version = "2.17.0";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -73,18 +73,42 @@ class Lizimh extends ComicSource {
             type: "multiPartPage",
             load: async (page) => {
                 let parts = [];
+                // ① 首页推荐 = 精选国漫（源站首页分组里带「国漫」的那一组）
                 try {
                     let home = await Lizimh.getJson("/app/api/home/data");
-                    for (let g of home.home_content_list || []) {
-                        let comics = (g.comic_list || []).map((c) => this.parseComic(c));
-                        if (comics.length) parts.push({ title: g.title || "推荐", comics: comics });
+                    let groups = home.home_content_list || [];
+                    let pick = null;
+                    for (let g of groups) {
+                        let t = String(g.title || "");
+                        if (t.indexOf("国漫") >= 0) { pick = g; break; }
+                    }
+                    if (!pick && groups.length) pick = groups[0];
+                    if (pick) {
+                        let comics = (pick.comic_list || []).map((c) => this.parseComic(c, "desc"));
+                        if (comics.length) parts.push({ title: "首页推荐", comics: comics });
                     }
                 } catch (e) {}
+                // ② 周期更新：按 updatedAt 算出「星期几更新」，分到周一~周日
                 try {
-                    let rank = await Lizimh.getJson("/app/api/rank/list");
-                    for (let g of rank.rank_list || []) {
-                        let comics = (g.comic_list || []).map((c) => this.parseComic(c));
-                        if (comics.length) parts.push({ title: g.title || g.name || "排行", comics: comics });
+                    let pool = await this.collectUpdatePool();
+                    let names = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+                    let buckets = [[], [], [], [], [], [], []];
+                    let seen = {};
+                    for (let c of pool) {
+                        if (!c || !c.updatedAt) continue;
+                        let id = String(c.id);
+                        if (seen[id]) continue;
+                        seen[id] = 1;
+                        let w = new Date(Number(c.updatedAt) * 1000).getDay();
+                        if (isNaN(w)) continue;
+                        if (buckets[w].length < 12) {
+                            buckets[w].push(this.parseComic(c, "chapter"));
+                        }
+                    }
+                    for (let i of [1, 2, 3, 4, 5, 6, 0]) {
+                        if (buckets[i].length) {
+                            parts.push({ title: names[i], comics: buckets[i] });
+                        }
                     }
                 } catch (e) {}
                 if (!parts.length) throw new Error("探索页加载失败");
@@ -92,6 +116,34 @@ class Lizimh extends ComicSource {
             },
         },
     ];
+
+    // 收集帶 updatedAt 的漫畫池（首頁分組 + 排行 + 分類分頁），供「周期更新」分桶
+    async collectUpdatePool() {
+        let pool = [];
+        try {
+            let home = await Lizimh.getJson("/app/api/home/data");
+            for (let g of home.home_content_list || []) {
+                pool.push(...(g.comic_list || []));
+            }
+        } catch (e) {}
+        try {
+            let rank = await Lizimh.getJson("/app/api/rank/list");
+            for (let g of rank.rank_list || []) {
+                pool.push(...(g.comic_list || []));
+            }
+        } catch (e) {}
+        for (let page = 1; page <= 6; page++) {
+            try {
+                let data = await Lizimh.getJson("/app/api/category/list?page=" + page);
+                let list = data.category_list || [];
+                if (!list.length) break;
+                pool.push(...list);
+            } catch (e) {
+                break;
+            }
+        }
+        return pool;
+    }
 
     // 圖片 URL -> 線路索引 / 原始路徑, 供失敗換線使用
     _imgLine = {};
@@ -258,11 +310,20 @@ class Lizimh extends ComicSource {
         return null;
     }
 
-    parseComic(c) {
+    // mode: undefined -> 用作者當副標題; "desc" -> 用簡介; "chapter" -> 用「第N话」
+    parseComic(c, mode) {
+        let sub = c.author || "";
+        if (mode === "desc") {
+            let t = String(c.content || "").replace(/\s+/g, " ").trim();
+            sub = t.length > 22 ? t.substring(0, 22) + "…" : t;
+        } else if (mode === "chapter") {
+            let n = Number(c.nums);
+            sub = n > 0 ? "第" + n + "话" : (Number(c.isend) === 1 ? "已完结" : "连载中");
+        }
         return new Comic({
             id: String(c.id),
             title: c.name || "",
-            subTitle: c.author || "",
+            subTitle: sub,
             cover: this.abs(c.picY || c.picX || c.cover),
             tags: (c.tags || "").split(",").filter((t) => t),
             description: c.content || "",
