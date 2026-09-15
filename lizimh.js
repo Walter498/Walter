@@ -1,7 +1,7 @@
 /** @type {import('./_venera_.js')} */
 
 /**
- * 栗子漫画 (lizimh) 源  v2.9.0
+ * 栗子漫画 (lizimh) 源  v2.10.0
  *
  * API:   http://ai.qsmm.fun      (配置 AES-ECB 解出, 無需簽名)
  * 圖片:  多條線路可選 (配置下發 generators)
@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.9.0";
+    version = "2.10.0";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -183,6 +183,35 @@ class Lizimh extends ComicSource {
 
     // 測速: 對每條線發一次 HEAD, 按延遲排序 (auto 模式使用)
     async speedTest() {
+        // 只對直連線路測速（代理型線路單獨排到最後，避免探測繞代理而變慢）
+        let direct = [], proxy = [];
+        for (let i = 0; i < Lizimh.lines.length; i++) {
+            (Lizimh.lines[i].proxy ? proxy : direct).push(i);
+        }
+        if (direct.length) {
+            let measured = [];
+            for (let i of direct) {
+                let t0 = Date.now();
+                let ok = false;
+                try {
+                    let res = await Promise.race([
+                        Network.sendRequest("HEAD", Lizimh.lines[i].url + "/", {}),
+                        this.sleep(2500).then(() => null),
+                    ]);
+                    ok = res && res.status && res.status < 500;
+                } catch (e) { ok = false; }
+                let dt = Date.now() - t0;
+                measured.push({ i: i, ms: ok ? dt : 999999 });
+                await this.sleep(60);
+            }
+            measured.sort((a, b) => a.ms - b.ms);
+            this._lineOrder = measured.map((r) => r.i).concat(proxy);
+            let best = Lizimh.lines[this._lineOrder[0]];
+            console.log("[lizimh] 线路测速(仅直连): " + measured.map((r) =>
+                Lizimh.lines[r.i].name + "=" + (r.ms > 900000 ? "超时" : r.ms + "ms")).join(", ")
+                + " → 选用 " + best.name);
+            return;
+        }
         let results = [];
         for (let i = 0; i < Lizimh.lines.length; i++) {
             let t0 = Date.now();
