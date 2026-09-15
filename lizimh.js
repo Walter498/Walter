@@ -1,7 +1,7 @@
 /** @type {import('./_venera_.js')} */
 
 /**
- * 栗子漫画 (lizimh) 源  v2.19.0
+ * 栗子漫画 (lizimh) 源  v2.21.0
  *
  * API:   http://ai.qsmm.fun      (配置 AES-ECB 解出, 無需簽名)
  * 圖片:  多條線路可選 (配置下發 generators)
@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.19.0";
+    version = "2.21.0";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -569,12 +569,13 @@ class Lizimh extends ComicSource {
         let lo = Math.max(1, Math.min(coverPage || 1, maxPages));
         // 用同漫畫已知頁數作為額外下界參考
 
-        // 第一輪: 跨度 1,2,4,8,16,32 並行探, 一次夾出上界
+        // 第一輪: 大步長 50 並行探（+50,+100,+150,+200,+250），一輪夾出上界；
+        // 沒夾到就從新的 lo 再來一輪，直到出現 404/占位圖
         let hi = null;
-        let span = 1;
+        let span = 50;
         while (hi === null && lo + span <= maxPages + 1) {
             const probes = [];
-            for (let k = span, n = 0; n < LIMIT && lo + k <= maxPages; k *= 2, n++) probes.push(lo + k);
+            for (let k = span, n = 0; n < LIMIT && lo + k <= maxPages; k += 50, n++) probes.push(lo + k);
             if (!probes.length) break;
             const res = await probeAll(probes);
             let idx = -1;
@@ -585,7 +586,6 @@ class Lizimh extends ComicSource {
             } else {
                 if (res.some((x) => x === null)) break;
                 lo = probes[probes.length - 1];
-                span *= 2;
             }
         }
         if (hi === null) hi = Math.min(lo + 1, maxPages + 1);
