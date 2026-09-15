@@ -1,7 +1,7 @@
 /** @type {import('./_venera_.js')} */
 
 /**
- * 栗子漫画 (lizimh) 源  v2.12.0
+ * 栗子漫画 (lizimh) 源  v2.13.0
  *
  * API:   http://ai.qsmm.fun      (配置 AES-ECB 解出, 無需簽名)
  * 圖片:  多條線路可選 (配置下發 generators)
@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.12.0";
+    version = "2.13.0";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -564,7 +564,18 @@ class Lizimh extends ComicSource {
         const ok = async (u) => {
             try {
                 let r = await Network.sendRequest("GET", u, headers);
-                return r.status === 200 || r.status === 206;
+                if (r.status === 206) return true;         // Range 命中 = 真圖
+                if (r.status !== 200) return false;
+                // 200：可能是占位小圖，用長度判斷（<1KB 視為無效）
+                let len = 0;
+                try {
+                    let h = r.headers || {};
+                    let raw = h["content-length"] || h["Content-Length"] ||
+                              (h["Content-Length"] === undefined ? undefined : h["Content-Length"]);
+                    if (raw !== undefined) len = parseInt(raw, 10) || 0;
+                } catch (e) {}
+                if (!len && r.body) len = r.body.length;
+                return len >= 1024;
             } catch (e) {
                 return false;
             }
