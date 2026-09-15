@@ -1,7 +1,7 @@
 /** @type {import('./_venera_.js')} */
 
 /**
- * 栗子漫画 (lizimh) 源  v2.13.0
+ * 栗子漫画 (lizimh) 源  v2.14.0
  *
  * API:   http://ai.qsmm.fun      (配置 AES-ECB 解出, 無需簽名)
  * 圖片:  多條線路可選 (配置下發 generators)
@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.13.0";
+    version = "2.14.0";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -438,14 +438,27 @@ class Lizimh extends ComicSource {
         };
         const LIMIT = 6;
         // 單頁存在性: GET + Range, 200/206 = 存在, 404 = 不存在
+        // 關鍵：CDN 對「不存在的頁」會回 HTTP 200 + 82 字節占位圖，
+        // 所以必須用尺寸判斷，否則探測出的總頁數會虛高（下載就會 404）
+        const isReal = (res) => {
+            if (res.status === 206) return true;          // Range 命中 = 真圖
+            if (res.status !== 200) return false;
+            let len = 0;
+            try {
+                let h = res.headers || {};
+                let cl = h["content-length"] || h["Content-Length"] || h["Content-length"];
+                if (cl !== undefined) len = parseInt(cl, 10) || 0;
+            } catch (e) {}
+            if (!len && res.body) len = res.body.length;
+            return len >= 1024;
+        };
         const exists = async (i) => {
             for (let attempt = 0; attempt < 3; attempt++) {
                 try {
                     let res = await Network.sendRequest("GET", url(i), headers);
-                    if (res.status === 200 || res.status === 206) return true;
                     if (res.status === 404 || res.status === 403 || res.status === 400) return false;
                     if (res.status === 429 || res.status === 503) { await this.sleep(200 * (attempt + 1)); continue; }
-                    return null;
+                    return isReal(res);
                 } catch (e) { await this.sleep(100 * (attempt + 1)); }
             }
             return null;
