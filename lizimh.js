@@ -1,7 +1,7 @@
 /** @type {import('./_venera_.js')} */
 
 /**
- * 栗子漫画 (lizimh) 源  v2.7.0
+ * 栗子漫画 (lizimh) 源  v2.8.0
  *
  * API:   http://ai.qsmm.fun      (配置 AES-ECB 解出, 無需簽名)
  * 圖片:  多條線路可選 (配置下發 generators)
@@ -17,15 +17,15 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.7.0";
+    version = "2.8.0";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
     static api = "http://ai.qsmm.fun";
     // 圖片線路 (初始化時從 configv2 的 generators 覆蓋)
+    // 每條線路: {name, url, proxy?, src?}  proxy=true 表示 url 是代理前綴, 真實圖床是 src
     static lines = [
         { name: "线路1 (CF优选海外)", url: "https://cdn.lzimg.xyz" },
-        { name: "线路2 (mechat)", url: "http://img.mechat.fun" },
         { name: "线路3 (i.lzimg)", url: "https://i.lzimg.xyz" },
         { name: "备用 (cf-1.imgio.club)", url: "https://cf-1.imgio.club" },
     ];
@@ -116,10 +116,69 @@ class Lizimh extends ComicSource {
         return Lizimh.lines[i].url;
     }
 
+    // 由相對路徑構造絕對 URL (供探測與換線使用)
+    lineAbs(path, idx) {
+        let i = (idx === undefined || idx === null) ? this.currentLine() : idx;
+        if (i < 0 || i >= Lizimh.lines.length) i = 0;
+        let line = Lizimh.lines[i];
+        if (line.proxy && line.src) {
+            return line.url + encodeURIComponent(line.src + path);
+        }
+        return line.url + path;
+    }
+
+    // 解析服務端下發的線路 JS (img_generator.code), 跳過加密線路
+    static parseGenerators(code, generators) {
+        let text = "";
+        try {
+            text = Convert.decodeUtf8(Convert.decodeBase64(code));
+        } catch (e) {
+            text = "";
+        }
+        let out = [];
+        for (let gen of generators || []) {
+            if (gen.encrypt === true) continue;      // 加密線路: 插件無法解碼, 直接跳過
+            let fn = gen.func || "";
+            let host = gen.url || "";
+            let proxy = false, srcHost = "";
+            if (fn && text) {
+                let re = new RegExp("function\\s+" + fn + "\\s*\\([^)]*\\)\\s*\\{([\\s\\S]*?)\\n\\}");
+                let m = text.match(re);
+                if (m) {
+                    let body = m[1];
+                    if (body.indexOf("encodeURIComponent") >= 0) {
+                        proxy = true;
+                        let pm = body.match(/return\s+"([^"]+)"\s*\+\s*encodeURIComponent/);
+                        if (pm) host = pm[1];
+                        let sm = body.match(/var\s+t\s*=\s*"([^"]+)"/);
+                        if (sm) srcHost = sm[1];
+                    } else {
+                        let dm = body.match(/return\s+"([^"]*)"\s*\+\s*u/);
+                        if (dm && dm[1]) host = dm[1];
+                    }
+                }
+            }
+            if (!host || !/^https?:\/\//.test(host)) continue;
+            host = host.replace(/\/$/, "");
+            if (srcHost) srcHost = srcHost.replace(/\/$/, "");
+            out.push({
+                name: gen.name || fn || ("线路" + (out.length + 1)),
+                url: host,
+                proxy: proxy,
+                src: srcHost,
+            });
+        }
+        return out;
+    }
+
     abs(path) {
         if (!path) return "";
         if (path.startsWith("http")) return path;
-        return this.lineUrl() + path;
+        let line = Lizimh.lines[this.currentLine()] || Lizimh.lines[0];
+        if (line.proxy && line.src) {
+            return line.url + encodeURIComponent(line.src + path);
+        }
+        return line.url + path;
     }
 
     // 測速: 對每條線發一次 HEAD, 按延遲排序 (auto 模式使用)
@@ -208,14 +267,20 @@ class Lizimh extends ComicSource {
             let tags = (g.category_tabs && g.category_tabs.length) ? g.category_tabs : Lizimh.fallbackTags;
             let cls = data.cfg_comic_class || [];
             let classes = cls.length ? cls.map((c) => [c.name, c.id]) : Lizimh.fallbackClasses;
-            // 图片线路: generators 里带 url 的项
-            let gens = (g.img_generator && g.img_generator.generators) || [];
-            let lines = [];
-            for (let gen of gens) {
-                if (gen.url && /^https?:\/\//.test(gen.url)) {
-                    lines.push({ name: gen.name || gen.func || ("线路" + (lines.length + 1)), url: gen.url.replace(/\/$/, "") });
+            // 图片线路: 解析服务端下发的 JS, 跳过加密线路
+            let ig = g.img_generator || {};
+            let gens = ig.generators || [];
+            let lines = Lizimh.parseGenerators(ig.code || "", gens);
+            if (!lines.length) {
+                // 退回: 只取非加密且非百度代理的直连线路
+                for (let gen of gens) {
+                    if (gen.encrypt === true) continue;
+                    if (gen.url && /^https?:\/\//.test(gen.url) && !/baidu\.com/.test(gen.url)) {
+                        lines.push({ name: gen.name || gen.func, url: gen.url.replace(/\/$/, "") });
+                    }
                 }
             }
+            lines.push({ name: "备用 (cf-1.imgio.club)", url: "https://cf-1.imgio.club" });
             if (lines.length) Lizimh.lines = lines;
             // 依服務端線路重建設置項 (保留 auto)
             let opts = [{ value: "auto", text: "自动测速 (推荐)" }];
@@ -323,7 +388,7 @@ class Lizimh extends ComicSource {
     //   2. 並行上限 6 (HTTP/1.1 每主機連接數): 超過會排隊反而變慢
     //   3. 先按 1,2,4,8,16,32 跨度並行探一次夾出區間, 再在區間內並行細分
     async probePages(dir, ext, maxPages, coverPage, hint) {
-        const url = (i) => this.lineUrl() + dir + "/" + i + "." + ext;
+        const url = (i) => this.lineAbs(dir + "/" + i + "." + ext);
         const headers = {
             "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
             "Range": "bytes=0-0",
