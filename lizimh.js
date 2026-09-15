@@ -1,7 +1,7 @@
 /** @type {import('./_venera_.js')} */
 
 /**
- * 栗子漫画 (lizimh) 源  v2.14.0
+ * 栗子漫画 (lizimh) 源  v2.15.0
  *
  * API:   http://ai.qsmm.fun      (配置 AES-ECB 解出, 無需簽名)
  * 圖片:  多條線路可選 (配置下發 generators)
@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.14.0";
+    version = "2.15.0";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -430,7 +430,7 @@ class Lizimh extends ComicSource {
     //   1. GET + Range: 單次 ~116ms, 遠快於 HEAD 的 ~560ms
     //   2. 並行上限 6 (HTTP/1.1 每主機連接數): 超過會排隊反而變慢
     //   3. 先按 1,2,4,8,16,32 跨度並行探一次夾出區間, 再在區間內並行細分
-    async probePages(dir, ext, maxPages, coverPage, hint) {
+    async probePages(dir, ext, maxPages, coverPage) {
         const url = (i) => this.lineAbs(dir + "/" + i + "." + ext);
         const headers = {
             "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
@@ -487,7 +487,6 @@ class Lizimh extends ComicSource {
 
         let lo = Math.max(1, Math.min(coverPage || 1, maxPages));
         // 用同漫畫已知頁數作為額外下界參考
-        if (hint && hint > lo && hint <= maxPages) lo = Math.min(hint, maxPages);
 
         // 第一輪: 跨度 1,2,4,8,16,32 並行探, 一次夾出上界
         let hi = null;
@@ -664,10 +663,9 @@ class Lizimh extends ComicSource {
             if (!m) return;
             let dir = m[1], ext = m[3], coverPage = parseInt(m[2]) || 1;
             if (this._pageCache[dir]) return;
-            let hint = this._lastCount[String(comicId)] || 0;
             let maxPages = 300;
             try { maxPages = parseInt(this.loadSetting("maxPages") || "300"); } catch (e) {}
-            await this.probePages(dir, ext, maxPages, coverPage, hint);
+            await this.probePages(dir, ext, maxPages, coverPage);
         } catch (e) {}
     }
 
@@ -720,9 +718,7 @@ class Lizimh extends ComicSource {
             let dir = m[1], ext = m[3], coverPage = parseInt(m[2]) || 1;
             let maxPages = 300;
             try { maxPages = parseInt(this.loadSetting("maxPages") || "300"); } catch (e) {}
-            let hint = this._lastCount[String(comicId)] || 0;
-            let images = await this.probePages(dir, ext, maxPages, coverPage, hint);
-            this._lastCount[String(comicId)] = images.length;
+            let images = await this.probePages(dir, ext, maxPages, coverPage);
             // 後台預探下一章 (不阻塞當前返回)
             try {
                 let self = this;
