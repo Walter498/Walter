@@ -1,7 +1,7 @@
 /** @type {import('./_venera_.js')} */
 
 /**
- * 栗子漫画 (lizimh) 源  v2.22.0
+ * 栗子漫画 (lizimh) 源  v2.23.0
  *
  * API:   http://ai.qsmm.fun      (配置 AES-ECB 解出, 無需簽名)
  * 圖片:  多條線路可選 (配置下發 generators)
@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.22.0";
+    version = "2.23.0";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -93,12 +93,20 @@ class Lizimh extends ComicSource {
                             }
                         }
                     } catch (e) {}
+                    // 注意：search/full 是「全文搜尋」，不是標籤篩選 ——
+                    // 搜「系统」會撈回一堆只是內文提到系統、標籤完全不是系統的作品，
+                    // 所以這裡必須再用 tags 精確比對，否則推薦池會混進一堆無關標籤。
                     for (let tag of ["系统", "穿越", "玄幻"]) {
                         try {
                             let res = await Lizimh.getJson(
                                 "/app/api/search/full?q=" + encodeURIComponent(tag) + "&page=1"
                             );
-                            for (let c of res.search_full || []) add(c);
+                            for (let c of res.search_full || []) {
+                                let tags = String(c.tags || "").split(",").map((t) => t.trim());
+                                let name = String(c.name || "");
+                                // 標籤命中，或作品名直接帶該關鍵詞，才算這個題材
+                                if (tags.indexOf(tag) >= 0 || name.indexOf(tag) >= 0) add(c);
+                            }
                         } catch (e) {}
                     }
                     if (pool.length) {
