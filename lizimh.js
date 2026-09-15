@@ -1,7 +1,7 @@
 /** @type {import('./_venera_.js')} */
 
 /**
- * 栗子漫画 (lizimh) 源  v2.10.0
+ * 栗子漫画 (lizimh) 源  v2.11.0
  *
  * API:   http://ai.qsmm.fun      (配置 AES-ECB 解出, 無需簽名)
  * 圖片:  多條線路可選 (配置下發 generators)
@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.10.0";
+    version = "2.11.0";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -494,9 +494,28 @@ class Lizimh extends ComicSource {
         }
 
         if (lo < 1) lo = 1;
+        // 驗證尾段與中段若干頁，剔除不存在者（推導可能出錯，會導致整章下載失敗）
+        let valid = [];
+        for (let i = 1; i <= lo; i++) valid.push(i);
+        try {
+            const check = [];
+            for (let k = Math.max(1, lo - 2); k <= lo; k++) check.push(k);
+            const mid = Math.floor(lo / 2);
+            for (let k = Math.max(1, mid - 1); k <= mid + 1; k++) check.push(k);
+            const uniq = Array.from(new Set(check));
+            const res = await Promise.all(uniq.map((i) => exists(i)));
+            const bad = new Set();
+            for (let k = 0; k < uniq.length; k++) if (res[k] === false) bad.add(uniq[k]);
+            if (bad.size) {
+                console.log("[lizimh] 过滤不存在的页: " + Array.from(bad).join(","));
+                valid = valid.filter((i) => !bad.has(i));
+            }
+        } catch (e) {}
         this._pageCache[dir] = lo;
         this.persistPages();
-        return build(lo);
+        let imgs = [];
+        for (let i of valid) imgs.push(url(i));
+        return imgs;
     }
 
     // 後台預探下一章的頁數 (讓翻下一話秒開)
@@ -590,6 +609,9 @@ class Lizimh extends ComicSource {
         onImageLoad: (url, comicId, epId) => {
             let self = this;
             return {
+                headers: {
+                    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+                },
                 onLoadFailed: () => {
                     let alt = self.nextLineUrl(url);
                     if (!alt) return undefined;
