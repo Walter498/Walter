@@ -1,7 +1,7 @@
 /** @type {import('./_venera_.js')} */
 
 /**
- * 栗子漫画 (lizimh) 源  v2.15.0
+ * 栗子漫画 (lizimh) 源  v2.16.0
  *
  * API:   http://ai.qsmm.fun      (配置 AES-ECB 解出, 無需簽名)
  * 圖片:  多條線路可選 (配置下發 generators)
@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.15.0";
+    version = "2.16.0";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -648,27 +648,6 @@ class Lizimh extends ComicSource {
         } catch (e) {}
     }
 
-    // 後台預探下一章的頁數 (讓翻下一話秒開)
-    async prefetchNext(comicId, epId) {
-        try {
-            let order = this._orderCache[String(comicId)];
-            if (!order) return;
-            let idx = order.indexOf(String(epId));
-            if (idx < 0 || idx + 1 >= order.length) return;
-            let nextId = order[idx + 1];
-            let covers = this._coverCache[String(comicId)] || {};
-            let cov = covers[nextId];
-            if (!cov) return;
-            let m = String(cov).match(/^(.*)\/(\d+)\.([A-Za-z0-9]+)$/);
-            if (!m) return;
-            let dir = m[1], ext = m[3], coverPage = parseInt(m[2]) || 1;
-            if (this._pageCache[dir]) return;
-            let maxPages = 300;
-            try { maxPages = parseInt(this.loadSetting("maxPages") || "300"); } catch (e) {}
-            await this.probePages(dir, ext, maxPages, coverPage);
-        } catch (e) {}
-    }
-
     sleep(ms) {
         return new Promise((resolve) => setTimeout(resolve, ms));
     }
@@ -719,11 +698,6 @@ class Lizimh extends ComicSource {
             let maxPages = 300;
             try { maxPages = parseInt(this.loadSetting("maxPages") || "300"); } catch (e) {}
             let images = await this.probePages(dir, ext, maxPages, coverPage);
-            // 後台預探下一章 (不阻塞當前返回)
-            try {
-                let self = this;
-                setTimeout(() => { self.prefetchNext(comicId, epId); }, 400);
-            } catch (e) {}
             if (!images.length) throw new Error("该章节图片探测失败");
             let line = this.currentLine();
             for (let u of images) {
