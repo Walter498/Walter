@@ -1,7 +1,7 @@
 /** @type {import('./_venera_.js')} */
 
 /**
- * 栗子漫画 (lizimh) 源  v2.17.0
+ * 栗子漫画 (lizimh) 源  v2.18.0
  *
  * API:   http://ai.qsmm.fun      (配置 AES-ECB 解出, 無需簽名)
  * 圖片:  多條線路可選 (配置下發 generators)
@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.17.0";
+    version = "2.18.0";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -721,10 +721,20 @@ class Lizimh extends ComicSource {
             let chapterCovers = {};
             let list = (data.chapters || []).slice().sort((a, b) => a.order - b.order);
             let order = [];
+            // 章節封面：源站每個章節都帶一張「該章內頁」路徑（如 /2/58342/2202527/25.jpg），
+            // 直接拿它當封面（就是漫畫裡的一張圖）。沒有 cover 的章節沿用最近一張，
+            // 這樣「無論如何都有封面」而不是空白 —— 但載入內頁用的 covers 只放真正屬於
+            // 該章的路徑，避免探測到別章的目錄。
+            let lastCover = "";
             for (let ch of list) {
-                chapters[String(ch.id)] = ch.name || `第${ch.order}话`;
-                if (ch.cover) covers[String(ch.id)] = ch.cover;
-                order.push(String(ch.id));
+                let key = String(ch.id);
+                chapters[key] = ch.name || `第${ch.order}话`;
+                if (ch.cover) {
+                    covers[key] = ch.cover;
+                    lastCover = ch.cover;
+                }
+                if (lastCover) chapterCovers[key] = this.abs(lastCover);
+                order.push(key);
             }
             this._coverCache[String(id)] = covers;
             this._orderCache[String(id)] = order;
