@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.24.0";
+    version = "2.25.0";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -156,9 +156,9 @@ class Lizimh extends ComicSource {
                         seen[id] = 1;
                         let w = new Date(Number(c.updatedAt) * 1000).getDay();
                         if (isNaN(w)) continue;
-                        if (buckets[w].length < 12) {
-                            buckets[w].push(this.parseComic(c, "chapter"));
-                        }
+                        // v2.25.0：不再封頂 12 本 —— 池裡有多少給多少，
+                        // App「查看更多」會全部列出
+                        buckets[w].push(this.parseComic(c, "chapter"));
                     }
                     for (let i of [1, 2, 3, 4, 5, 6, 0]) {
                         if (buckets[i].length) {
@@ -441,24 +441,30 @@ class Lizimh extends ComicSource {
     categoryComics = {
         load: async (category, param, options, page) => {
             let comics = [];
+            let p = page || 1;
             if (param === "rank") {
                 let data = await Lizimh.getJson("/app/api/rank/list");
                 for (let g of data.rank_list || []) {
                     comics.push(...(g.comic_list || []).map((c) => this.parseComic(c)));
                 }
             } else {
-                let qs = "";
-                if (param.startsWith("tag:")) qs = "tag=" + encodeURIComponent(param.substring(4));
-                else if (param.startsWith("class:")) qs = "class=" + param.substring(6);
-                else if (param.startsWith("isend:")) qs = "isend=" + param.substring(6);
-                if (qs) {
-                    let data = await Lizimh.getJson(`/app/api/category/list?${qs}`);
+                // v2.25.0：支援組合篩選 "tag:格斗|class:3|isend:0" + 分頁，
+                // 供 App 分類頁（篩選 chips + 即時網格）多條件查詢使用。
+                let qsParts = [];
+                for (let seg of String(param || "").split("|")) {
+                    if (seg.startsWith("tag:")) qsParts.push("tag=" + encodeURIComponent(seg.substring(4)));
+                    else if (seg.startsWith("class:")) qsParts.push("class=" + seg.substring(6));
+                    else if (seg.startsWith("isend:")) qsParts.push("isend=" + seg.substring(6));
+                }
+                if (qsParts.length) {
+                    let data = await Lizimh.getJson(`/app/api/category/list?${qsParts.join("&")}&page=${p}`);
                     comics = (data.category_list || []).map((c) => this.parseComic(c));
                 }
             }
             let seen = new Set();
             comics = comics.filter((c) => !seen.has(c.id) && seen.add(c.id));
-            return { comics: comics, maxPage: 1 };
+            // 非空就允許繼續翻頁（抓回空頁即到底）
+            return { comics: comics, maxPage: comics.length ? p + 1 : p };
         },
     };
 
