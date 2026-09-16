@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.25.0";
+    version = "2.25.1";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -458,6 +458,10 @@ class Lizimh extends ComicSource {
                 }
                 if (qsParts.length) {
                     let data = await Lizimh.getJson(`/app/api/category/list?${qsParts.join("&")}&page=${p}`);
+                    comics = (data.category_list || []).map((c) => this.parseComic(c));
+                } else {
+                    // v2.25.1：「全部」（沒有任何篩選條件）= 未篩選的分類總列表
+                    let data = await Lizimh.getJson(`/app/api/category/list?page=${p}`);
                     comics = (data.category_list || []).map((c) => this.parseComic(c));
                 }
             }
