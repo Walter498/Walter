@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.23.0";
+    version = "2.24.0";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -73,6 +73,21 @@ class Lizimh extends ComicSource {
             type: "multiPartPage",
             load: async (page) => {
                 let parts = [];
+                // v2.24.0 提速：所有請求同時發射（Promise 並行），總耗時
+                // ≈ 最慢的一個請求，而不是十幾個請求排隊相加。
+                // home/data 只抓一次，推荐池與周期更新共用同一個 Promise。
+                let homeP = Lizimh.getJson("/app/api/home/data").catch(() => null);
+                let tagP = ["系统", "穿越", "玄幻"].map((tag) =>
+                    Lizimh.getJson("/app/api/search/full?q=" + encodeURIComponent(tag) + "&page=1")
+                        .then((res) => ({ tag: tag, res: res }))
+                        .catch(() => null)
+                );
+                let rankP = Lizimh.getJson("/app/api/rank/list").catch(() => null);
+                let catP = [];
+                for (let p = 1; p <= 6; p++) {
+                    catP.push(Lizimh.getJson("/app/api/category/list?page=" + p).catch(() => null));
+                }
+
                 // ① 首页推荐：精選國漫 + 系統/穿越/玄幻 三種題材，合成一個大池子。
                 // 宿主首頁只顯示 6 本，「换一换」從整個池子裡抽 → 種類才夠多。
                 try {
@@ -84,30 +99,26 @@ class Lizimh extends ComicSource {
                         seen[id] = 1;
                         pool.push(c);
                     };
-                    try {
-                        let home = await Lizimh.getJson("/app/api/home/data");
+                    let home = await homeP;
+                    if (home) {
                         for (let g of home.home_content_list || []) {
                             let t = String(g.title || "");
                             if (t.indexOf("国漫") >= 0) {
                                 for (let c of g.comic_list || []) add(c);
                             }
                         }
-                    } catch (e) {}
+                    }
                     // 注意：search/full 是「全文搜尋」，不是標籤篩選 ——
                     // 搜「系统」會撈回一堆只是內文提到系統、標籤完全不是系統的作品，
                     // 所以這裡必須再用 tags 精確比對，否則推薦池會混進一堆無關標籤。
-                    for (let tag of ["系统", "穿越", "玄幻"]) {
-                        try {
-                            let res = await Lizimh.getJson(
-                                "/app/api/search/full?q=" + encodeURIComponent(tag) + "&page=1"
-                            );
-                            for (let c of res.search_full || []) {
-                                let tags = String(c.tags || "").split(",").map((t) => t.trim());
-                                let name = String(c.name || "");
-                                // 標籤命中，或作品名直接帶該關鍵詞，才算這個題材
-                                if (tags.indexOf(tag) >= 0 || name.indexOf(tag) >= 0) add(c);
-                            }
-                        } catch (e) {}
+                    for (let r of await Promise.all(tagP)) {
+                        if (!r) continue;
+                        for (let c of r.res.search_full || []) {
+                            let tags = String(c.tags || "").split(",").map((t) => t.trim());
+                            let name = String(c.name || "");
+                            // 標籤命中，或作品名直接帶該關鍵詞，才算這個題材
+                            if (tags.indexOf(r.tag) >= 0 || name.indexOf(r.tag) >= 0) add(c);
+                        }
                     }
                     if (pool.length) {
                         parts.push({
@@ -118,7 +129,23 @@ class Lizimh extends ComicSource {
                 } catch (e) {}
                 // ② 周期更新：按 updatedAt 算出「星期几更新」，分到周一~周日
                 try {
-                    let pool = await this.collectUpdatePool();
+                    let pool = [];
+                    let home = await homeP;      // 同一 Promise，不會重複發請求
+                    if (home) {
+                        for (let g of home.home_content_list || []) {
+                            pool.push(...(g.comic_list || []));
+                        }
+                    }
+                    let rank = await rankP;
+                    if (rank) {
+                        for (let g of rank.rank_list || []) {
+                            pool.push(...(g.comic_list || []));
+                        }
+                    }
+                    for (let data of await Promise.all(catP)) {
+                        if (!data) continue;
+                        pool.push(...(data.category_list || []));
+                    }
                     let names = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
                     let buckets = [[], [], [], [], [], [], []];
                     let seen = {};
@@ -145,33 +172,6 @@ class Lizimh extends ComicSource {
         },
     ];
 
-    // 收集帶 updatedAt 的漫畫池（首頁分組 + 排行 + 分類分頁），供「周期更新」分桶
-    async collectUpdatePool() {
-        let pool = [];
-        try {
-            let home = await Lizimh.getJson("/app/api/home/data");
-            for (let g of home.home_content_list || []) {
-                pool.push(...(g.comic_list || []));
-            }
-        } catch (e) {}
-        try {
-            let rank = await Lizimh.getJson("/app/api/rank/list");
-            for (let g of rank.rank_list || []) {
-                pool.push(...(g.comic_list || []));
-            }
-        } catch (e) {}
-        for (let page = 1; page <= 6; page++) {
-            try {
-                let data = await Lizimh.getJson("/app/api/category/list?page=" + page);
-                let list = data.category_list || [];
-                if (!list.length) break;
-                pool.push(...list);
-            } catch (e) {
-                break;
-            }
-        }
-        return pool;
-    }
 
     // 圖片 URL -> 線路索引 / 原始路徑, 供失敗換線使用
     _imgLine = {};
