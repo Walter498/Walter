@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.29.0";
+    version = "2.29.1";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -548,9 +548,22 @@ class Lizimh extends ComicSource {
         let token = "";
         try { token = String(this.loadSetting("authToken") || "").trim(); } catch (e) {}
         if (!token) return null;
+        let key = "officialPics_" + String(chapterId);
         if (this._officialCache[String(chapterId)]) {
             return this._officialCache[String(chapterId)].slice();
         }
+        // 持久化快取：官方順序不會變，抓過一次就存起來
+        //（這個接口會消耗帳號的閱讀額度，別重複抓）
+        try {
+            let saved = this.loadData(key);
+            if (saved) {
+                let arr = JSON.parse(saved);
+                if (arr && arr.length) {
+                    this._officialCache[String(chapterId)] = arr;
+                    return arr.slice();
+                }
+            }
+        } catch (e) {}
         try {
             let res = await Network.get(
                 Lizimh.api + "/app/api/chapter/v3/" + chapterId,
@@ -561,6 +574,7 @@ class Lizimh extends ComicSource {
             if (!pics.length) return null;
             let out = pics.map((x) => this.abs(String(x)));
             this._officialCache[String(chapterId)] = out;
+            try { this.saveData(key, JSON.stringify(out)); } catch (e) {}
             return out.slice();
         } catch (e) {
             return null;
