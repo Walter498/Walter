@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.28.0";
+    version = "2.29.0";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -44,6 +44,12 @@ class Lizimh extends ComicSource {
                 { value: "3", text: "备用 (cf-1.imgio.club)" },
             ],
             default: "auto",
+        },
+        authToken: {
+            title: "官方登录凭证 (JWT，选填)",
+            type: "input",
+            default: "",
+            description: "贴上栗子官方 App 的 authorization 值（抓包取得）。填了之后，章节图片会使用官方顺序（解决个别章节图片乱序），不填则用文件名顺序。",
         },
         maxPages: {
             title: "单章最大页数 (探测上限)",
@@ -491,6 +497,9 @@ class Lizimh extends ComicSource {
         return hit;
     }
 
+    // 官方順序快取: chapterId -> [url]
+    _officialCache = {};
+
     // 章節封面快取: comicId -> {chapterId: coverPath}
     _coverCache = {};
     // 章節順序: comicId -> [chapterId...]
@@ -530,6 +539,32 @@ class Lizimh extends ComicSource {
                 for (let k in obj) this._pageCache[k] = obj[k];
             }
         } catch (e) {}
+    }
+
+    // v2.29.0：取官方章節圖片順序（需要登入憑證）
+    // 有些章節是人工上傳、檔名編號與閱讀順序不一致（例：第153话 官方順序是
+    // 1..12, 49, 13, 14...），只有官方接口回的 pics 才是正確順序。
+    async officialPics(chapterId) {
+        let token = "";
+        try { token = String(this.loadSetting("authToken") || "").trim(); } catch (e) {}
+        if (!token) return null;
+        if (this._officialCache[String(chapterId)]) {
+            return this._officialCache[String(chapterId)].slice();
+        }
+        try {
+            let res = await Network.get(
+                Lizimh.api + "/app/api/chapter/v3/" + chapterId,
+                { "Accept": "application/json", "authorization": token });
+            if (!res || res.status !== 200) return null;
+            let data = JSON.parse(res.body);
+            let pics = (data && data.data && data.data.pics) || [];
+            if (!pics.length) return null;
+            let out = pics.map((x) => this.abs(String(x)));
+            this._officialCache[String(chapterId)] = out;
+            return out.slice();
+        } catch (e) {
+            return null;
+        }
     }
 
     async chapterCovers(comicId) {
@@ -852,6 +887,13 @@ class Lizimh extends ComicSource {
         },
 
         loadEp: async (comicId, epId) => {
+            // v2.29.0：設定了官方憑證 → 直接用官方順序（最準，解決亂序章節）
+            try {
+                const official = await this.officialPics(epId);
+                if (official && official.length) {
+                    return { images: official };
+                }
+            } catch (e) {}
             let covers = await this.chapterCovers(comicId);
             let cover = covers[String(epId)];
             if (!cover) throw new Error("找不到该章节的图片路径");
