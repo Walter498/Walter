@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.25.1";
+    version = "2.27.0";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -587,7 +587,10 @@ class Lizimh extends ComicSource {
             const lastOk = await exists(cached);
             if (lastOk === true) {
                 const nextGone = await exists(cached + 1);
-                if (nextGone === false) {
+                // 只有「下一頁也連續不存在」才相信快取；否則丟掉重探
+                //（單頁缺失可能只是抖動，重探會給出正確的完整清單）
+                const nextGone2 = nextGone === false ? await exists(cached + 2) : null;
+                if (nextGone === false && nextGone2 === false) {
                     this._verified[dir] = build(cached);
                     this._pageCache[dir] = cached;
                     return this._verified[dir].slice();
@@ -639,23 +642,43 @@ class Lizimh extends ComicSource {
         }
 
         if (lo < 1) lo = 1;
-        // 驗證尾段與中段若干頁，剔除不存在者（推導可能出錯，會導致整章下載失敗）
+
+        // ===== v2.27.0 修正：頁數寧可多算，絕不少算 =====
+        // 舊版會把「探測失敗的頁」從清單中刪掉 —— 但探測失敗多半只是 CDN
+        // 抖動（或 429 限流），刪一頁會讓它之後的所有頁整章錯位（用戶反饋：
+        // 第153話之後圖片順序完全混亂）。現在改成：
+        //   1) 二分之後再向後多探 5 頁，確認真的到底；
+        //   2) 只有【連續兩頁】都明確不存在，才承認 lo 是最後一頁；
+        //   3) 任何探測失敗都不再刪頁（個別頁真的壞了，由 resolvePageUrl
+        //      逐頁換線路/換擴展名處理，或閱讀器重試）。
+        let scan = lo;
+        for (let k = 0; k < 5; k++) {
+            let e = await exists(scan + 1);
+            if (e === true) { scan = scan + 1; continue; }
+            break;
+        }
+        {
+            const e1 = await exists(scan + 1);
+            const e2 = e1 === false ? await exists(scan + 2) : null;
+            if (e1 === true || (e1 === null && e2 === true)) {
+                // 真的還有 → 逐步往後推到邊界
+                let cursor = scan + 1;
+                for (let k = 0; k < 10; k++) {
+                    let e = await exists(cursor);
+                    if (e === true) { cursor = cursor + 1; continue; }
+                    break;
+                }
+                scan = Math.max(scan, cursor - 1);
+            } else if (e1 === false && e2 === false) {
+                // 連續兩頁缺失 → 確認到底
+            } else if (e1 === false && e2 !== false) {
+                // 第一頁缺失但下一頁還在（可疑）→ 保守多算一頁
+                scan = scan + 1;
+            }
+        }
+        lo = scan;
         let valid = [];
         for (let i = 1; i <= lo; i++) valid.push(i);
-        try {
-            const check = [];
-            for (let k = Math.max(1, lo - 2); k <= lo; k++) check.push(k);
-            const mid = Math.floor(lo / 2);
-            for (let k = Math.max(1, mid - 1); k <= mid + 1; k++) check.push(k);
-            const uniq = Array.from(new Set(check));
-            const res = await Promise.all(uniq.map((i) => exists(i)));
-            const bad = new Set();
-            for (let k = 0; k < uniq.length; k++) if (res[k] === false) bad.add(uniq[k]);
-            if (bad.size) {
-                console.log("[lizimh] 过滤不存在的页: " + Array.from(bad).join(","));
-                valid = valid.filter((i) => !bad.has(i));
-            }
-        } catch (e) {}
         this._pageCache[dir] = lo;
         this.persistPages();
         this.scheduleVerify(dir, ext, lo);
