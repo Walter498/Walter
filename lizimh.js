@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.27.0";
+    version = "2.28.0";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -471,6 +471,25 @@ class Lizimh extends ComicSource {
             return { comics: comics, maxPage: comics.length ? p + 1 : p };
         },
     };
+
+    // v2.28.0：供 App「清除本漫畫快取」按鈕呼叫 ——
+    // 清掉這部漫畫的頁數快取/已驗證頁清單/封面快取，並持久化
+    resetComicCache(comicId) {
+        let id = String(comicId || "");
+        if (!id) return false;
+        let hit = 0;
+        for (let dir in this._pageCache) {
+            if (dir.indexOf("/" + id + "/") >= 0 || dir.indexOf(id) >= 0) {
+                delete this._pageCache[dir];
+                delete this._verified[dir];
+                hit++;
+            }
+        }
+        // 章節封面快取（key 是 comicId）
+        try { delete this._coverCache[id]; delete this._orderCache[id]; } catch (e) {}
+        this.persistPages();
+        return hit;
+    }
 
     // 章節封面快取: comicId -> {chapterId: coverPath}
     _coverCache = {};
