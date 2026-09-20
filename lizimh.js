@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.29.1";
+    version = "2.29.2";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -484,15 +484,32 @@ class Lizimh extends ComicSource {
         let id = String(comicId || "");
         if (!id) return false;
         let hit = 0;
+        // v2.29.2 修正：快取 key 是【圖片目錄】（例 /Manual/jARSPL8b/mcf4HZLK），
+        // 目錄名裡沒有漫畫 id → 舊版用 id 匹配永遠清不到。
+        // 正確做法：由這部漫畫每章的封面路徑推導出目錄，再逐一清除。
+        let covers = this._coverCache[id] || null;
+        if (covers) {
+            for (let cid in covers) {
+                let dir = String(covers[cid]).replace(/\/[^\/]+$/, "");
+                if (this._pageCache[dir] !== undefined) {
+                    delete this._pageCache[dir];
+                    hit++;
+                }
+                delete this._verified[dir];
+                // 官方順序快取（記憶體 + 持久化）
+                delete this._officialCache[cid];
+                try { this.saveData("officialPics_" + cid, ""); } catch (e) {}
+            }
+        }
+        try { delete this._coverCache[id]; delete this._orderCache[id]; } catch (e) {}
+        // 保險：任何路徑剛好含此 id 的也清掉
         for (let dir in this._pageCache) {
-            if (dir.indexOf("/" + id + "/") >= 0 || dir.indexOf(id) >= 0) {
+            if (dir.indexOf(id) >= 0) {
                 delete this._pageCache[dir];
                 delete this._verified[dir];
                 hit++;
             }
         }
-        // 章節封面快取（key 是 comicId）
-        try { delete this._coverCache[id]; delete this._orderCache[id]; } catch (e) {}
         this.persistPages();
         return hit;
     }
