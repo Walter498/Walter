@@ -17,11 +17,18 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.29.2";
+    version = "2.30.0";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
-    static api = "http://ai.qsmm.fun";
+    // v2.30.0：官方域名會輪換/被封（ai.qsmm.fun 已被停用 DNS），
+    // 這裡維護一個域名池，任何一個可用就自動用它並記住。
+    static apiHosts = [
+        "http://ai.xajtl.com",
+        "http://ai.qsmm.fun",
+    ];
+    static _apiIndex = 0;
+    static get api() { return Lizimh.apiHosts[Lizimh._apiIndex % Lizimh.apiHosts.length]; }
     // 圖片線路 (初始化時從 configv2 的 generators 覆蓋)
     // 每條線路: {name, url, proxy?, src?}  proxy=true 表示 url 是代理前綴, 真實圖床是 src
     static lines = [
@@ -365,11 +372,22 @@ class Lizimh extends ComicSource {
     }
 
     static async getJson(path) {
-        let res = await Network.get(Lizimh.api + path, { "Accept": "application/json" });
-        if (res.status !== 200) throw new Error(`HTTP ${res.status}`);
-        let json = JSON.parse(res.body);
-        if (json.code !== 201) throw new Error(`API code ${json.code}: ${json.msg || ""}`);
-        return json.data;
+        const hosts = Lizimh.apiHosts;
+        let lastErr = null;
+        for (let i = 0; i < hosts.length; i++) {
+            const idx = (Lizimh._apiIndex + i) % hosts.length;
+            try {
+                let res = await Network.get(hosts[idx] + path, { "Accept": "application/json" });
+                if (res.status !== 200) throw new Error(`HTTP ${res.status}`);
+                let json = JSON.parse(res.body);
+                if (json.code !== 201) throw new Error(`API code ${json.code}: ${json.msg || ""}`);
+                Lizimh._apiIndex = idx;      // 記住這台可用
+                return json.data;
+            } catch (e) {
+                lastErr = e;
+            }
+        }
+        throw lastErr || new Error("API 全部域名不可達");
     }
 
     static fmtDate(iso) { return iso ? String(iso).substring(0, 10) : ""; }
@@ -582,9 +600,19 @@ class Lizimh extends ComicSource {
             }
         } catch (e) {}
         try {
-            let res = await Network.get(
-                Lizimh.api + "/app/api/chapter/v3/" + chapterId,
-                { "Accept": "application/json", "authorization": token });
+            let res = null;
+            const hosts = Lizimh.apiHosts;
+            for (let i = 0; i < hosts.length && (!res || res.status !== 200); i++) {
+                const idx = (Lizimh._apiIndex + i) % hosts.length;
+                try {
+                    res = await Network.get(
+                        hosts[idx] + "/app/api/chapter/v3/" + chapterId,
+                        { "Accept": "application/json", "authorization": token });
+                    if (res && res.status === 200) Lizimh._apiIndex = idx;
+                } catch (e) {
+                    res = null;
+                }
+            }
             if (!res || res.status !== 200) return null;
             let data = JSON.parse(res.body);
             let pics = (data && data.data && data.data.pics) || [];
