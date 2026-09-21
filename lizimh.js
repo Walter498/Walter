@@ -17,24 +17,17 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.31.2";
+    version = "2.32.0";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
-    // v2.30.0：官方域名會輪換/被封（ai.qsmm.fun 已被停用 DNS），
-    // 這裡維護一個域名池，任何一個可用就自動用它並記住。
-    static apiHosts = [
-        "http://ai.xajtl.com",
-        "http://ai.qsmm.fun",
-    ];
-    static _apiIndex = -1;   // -1 = 未決定；第一次成功後記住並持久化
-    // 注意：不能用 `static get api()` —— App 的 JS 引擎（QuickJS）對
-    // class 靜態 getter 支援不佳，會回傳 undefined（實測日誌出現
-    // "GET undefined/app/api/..."）。改用普通靜態方法。
-    static apiUrl() {
-        const i = Lizimh._apiIndex < 0 ? 0 : Lizimh._apiIndex;
-        return Lizimh.apiHosts[i % Lizimh.apiHosts.length];
-    }
+    // v2.32.0：回到最保守的寫法（App 的 QuickJS 引擎對 class 靜態 getter /
+    // 複雜靜態欄位支援不佳，會導致整個源 init 失敗）。
+    // 主域名 + 備援域名，失敗時逐一重試，成功的那台記在 _apiOk 裡。
+    static api = "http://ai.xajtl.com";
+    static apiFallback = "http://ai.qsmm.fun";
+    static _useFallback = false;
+
     // 圖片線路 (初始化時從 configv2 的 generators 覆蓋)
     // 每條線路: {name, url, proxy?, src?}  proxy=true 表示 url 是代理前綴, 真實圖床是 src
     static lines = [
@@ -407,25 +400,29 @@ class Lizimh extends ComicSource {
     }
 
     static async getJson(path) {
-        const hosts = Lizimh.apiHosts;
-        let lastErr = null;
-        for (let i = 0; i < hosts.length; i++) {
-            const idx = (Lizimh._apiIndex + i) % hosts.length;
-            try {
-                let res = await Network.get(hosts[idx] + path, { "Accept": "application/json" });
-                if (res.status !== 200) throw new Error(`HTTP ${res.status}`);
-                let json = JSON.parse(res.body);
-                if (json.code !== 201) throw new Error(`API code ${json.code}: ${json.msg || ""}`);
-                if (Lizimh._apiIndex !== idx) {
-                    Lizimh._apiIndex = idx;
-                    try { ComicSource.find(Lizimh.key).saveData("apiIndex", String(idx)); } catch (e) {}
-                }
-                return json.data;
-            } catch (e) {
-                lastErr = e;
-            }
+        const primary = Lizimh._useFallback ? Lizimh.apiFallback : Lizimh.api;
+        const backup = Lizimh._useFallback ? Lizimh.api : Lizimh.apiFallback;
+        let err1 = null;
+        try {
+            let res = await Network.get(primary + path, { "Accept": "application/json" });
+            if (res.status !== 200) throw new Error("HTTP " + res.status);
+            let json = JSON.parse(res.body);
+            if (json.code !== 201) throw new Error("API code " + json.code + ": " + (json.msg || ""));
+            return json.data;
+        } catch (e) {
+            err1 = e;
         }
-        throw lastErr || new Error("API 全部域名不可達");
+        // 主域名失敗 → 試備援
+        try {
+            let res2 = await Network.get(backup + path, { "Accept": "application/json" });
+            if (res2.status !== 200) throw new Error("HTTP " + res2.status);
+            let json2 = JSON.parse(res2.body);
+            if (json2.code !== 201) throw new Error("API code " + json2.code + ": " + (json2.msg || ""));
+            Lizimh._useFallback = !Lizimh._useFallback;   // 記住這次能用的那台
+            return json2.data;
+        } catch (e2) {
+            throw err1 || e2;
+        }
     }
 
     static fmtDate(iso) { return iso ? String(iso).substring(0, 10) : ""; }
@@ -442,7 +439,6 @@ class Lizimh extends ComicSource {
     async init() {
         this.loadPersistedPages();
         this.loadPersistedVerified();
-        this.loadApiIndex();
         try {
             let data = await Lizimh.getJson("/app/api/configv2");
             let g = data.cfg_general || {};
@@ -603,16 +599,6 @@ class Lizimh extends ComicSource {
         } catch (e) {}
     }
 
-    loadApiIndex() {
-        try {
-            let v = this.loadData("apiIndex");
-            if (v !== null && v !== undefined && v !== "") {
-                let i = parseInt(v, 10);
-                if (!isNaN(i) && i >= 0 && i < Lizimh.apiHosts.length) Lizimh._apiIndex = i;
-            }
-        } catch (e) {}
-    }
-
     loadPersistedPages() {
         try {
             let raw = this.loadData("pageCounts");
@@ -653,18 +639,14 @@ class Lizimh extends ComicSource {
         } catch (e) {}
         try {
             let res = null;
-            const hosts = Lizimh.apiHosts;
-            for (let i = 0; i < hosts.length && (!res || res.status !== 200); i++) {
-                const idx = (Lizimh._apiIndex + i) % hosts.length;
+            const bases = [Lizimh._useFallback ? Lizimh.apiFallback : Lizimh.api,
+                           Lizimh._useFallback ? Lizimh.api : Lizimh.apiFallback];
+            for (let bi = 0; bi < bases.length && (!res || res.status !== 200); bi++) {
                 try {
-                    // 2 秒超時：拿不到就別卡住閱讀，改用檔名順序
-                    res = await Promise.race([
-                        Network.get(
-                            hosts[idx] + "/app/api/chapter/v3/" + chapterId,
-                            { "Accept": "application/json", "authorization": token }),
-                        this.sleep(2000).then(() => null),
-                    ]);
-                    if (res && res.status === 200) Lizimh._apiIndex = idx;
+                    res = await Network.get(
+                        bases[bi] + "/app/api/chapter/v3/" + chapterId,
+                        { "Accept": "application/json", "authorization": token });
+                    if (res && res.status === 200 && bi === 1) Lizimh._useFallback = !Lizimh._useFallback;
                 } catch (e) {
                     res = null;
                 }
