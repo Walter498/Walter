@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.31.1";
+    version = "2.31.2";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -578,8 +578,6 @@ class Lizimh extends ComicSource {
     _coverCache = {};
     // 章節順序: comicId -> [chapterId...]
     _orderCache = {};
-    // 同漫畫最近一次探測到的頁數 (作為提示)
-    _lastCount = {};
     // 章節頁數快取: dir -> pageCount (記憶體)
     _pageCache = {};
 
@@ -775,8 +773,14 @@ class Lizimh extends ComicSource {
             delete this._pageCache[dir];
         }
 
-        let lo = Math.max(1, Math.min(coverPage || 1, maxPages));
-        // 用同漫畫已知頁數作為額外下界參考
+        // v2.31.2（用戶要求）：每一章都當成全新章節 → 一律從第 1 頁開始探測。
+        // 舊版會拿「本章封面圖的頁碼」當起點（例：封面是第 68 頁就從 68 開始），
+        // 但封面頁碼可能大於實際總頁數（人工上傳的章節很常見）→ 探測起點錯誤
+        // 就會找不到真正的末頁。改成一律從 1 開始，只往後推。
+        let lo = 1;
+        if (coverPage && coverPage > 1) {
+            // 封面頁碼仍然有參考價值，但只用來【驗證】不用來當起點
+        }
 
         // 第一輪: 大步長 50 並行探（+50,+100,+150,+200,+250），一輪夾出上界；
         // 沒夾到就從新的 lo 再來一輪，直到出現 404/占位圖
