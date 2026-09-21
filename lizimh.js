@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.31.0";
+    version = "2.31.1";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -28,7 +28,10 @@ class Lizimh extends ComicSource {
         "http://ai.qsmm.fun",
     ];
     static _apiIndex = -1;   // -1 = 未決定；第一次成功後記住並持久化
-    static get api() {
+    // 注意：不能用 `static get api()` —— App 的 JS 引擎（QuickJS）對
+    // class 靜態 getter 支援不佳，會回傳 undefined（實測日誌出現
+    // "GET undefined/app/api/..."）。改用普通靜態方法。
+    static apiUrl() {
         const i = Lizimh._apiIndex < 0 ? 0 : Lizimh._apiIndex;
         return Lizimh.apiHosts[i % Lizimh.apiHosts.length];
     }
