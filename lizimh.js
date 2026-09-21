@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.32.0";
+    version = "2.33.0";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -764,44 +764,35 @@ class Lizimh extends ComicSource {
             // 封面頁碼仍然有參考價值，但只用來【驗證】不用來當起點
         }
 
-        // 第一輪: 大步長 50 並行探（+50,+100,+150,+200,+250），一輪夾出上界；
-        // 沒夾到就從新的 lo 再來一輪，直到出現 404/占位圖
-        let hi = null;
-        let span = 50;
-        while (hi === null && lo + span <= maxPages + 1) {
-            const probes = [];
-            for (let k = span, n = 0; n < LIMIT && lo + k <= maxPages; k += 50, n++) probes.push(lo + k);
-            if (!probes.length) break;
-            const res = await probeAll(probes);
-            let idx = -1;
-            for (let k = 0; k < probes.length; k++) { if (res[k] === false) { idx = k; break; } }
-            if (idx >= 0) {
-                hi = probes[idx];
-                lo = idx === 0 ? lo : probes[idx - 1];
-            } else {
-                if (res.some((x) => x === null)) break;
-                lo = probes[probes.length - 1];
+        // v2.33.0（用戶建議的優化）：
+        // 第一輪：一次並行探 1,25,50,75,…,maxPages（步長 25，最多十幾個請求）
+        //         → 找出最後一個「存在」的頁碼 lastOk
+        // 第二輪：在 (lastOk, lastOk+25) 這個小區間內【一次全部並行】探完
+        // 兩輪就定位到真實末頁，比舊版「多輪二分」快好幾倍。
+        const stride = 25;
+        const grid = [];
+        for (let n = 1; n <= maxPages; n += stride) grid.push(n);
+        if (grid[grid.length - 1] !== maxPages) grid.push(maxPages);
+        const gridRes = await Promise.all(grid.map((n) => exists(n)));
+        let lastOk = 0;
+        for (let k = 0; k < grid.length; k++) {
+            if (gridRes[k] === true) {
+                lastOk = grid[k];
+            } else if (gridRes[k] === false && lastOk > 0) {
+                break;   // 已經明確越過末頁，不必再往後看
             }
         }
-        if (hi === null) hi = Math.min(lo + 1, maxPages + 1);
-
-        // 第二輪: 區間內並行細分 (每批 6 個)
-        let guard = 0;
-        while (hi - lo > 1 && guard++ < 20) {
-            const mids = [];
-            const step = Math.max(1, Math.floor((hi - lo) / (LIMIT + 1)));
-            for (let m = lo + step; m < hi && mids.length < LIMIT; m += step) mids.push(m);
-            if (!mids.length) break;
-            const res = await Promise.all(mids.map((m) => exists(m)));
-            let nl = lo, nh = hi;
-            for (let k = 0; k < mids.length; k++) {
-                if (res[k] === true) nl = Math.max(nl, mids[k]);
-                else if (res[k] === false) nh = Math.min(nh, mids[k]);
+        if (lastOk < 1) lastOk = 1;
+        const hiBase = Math.min(lastOk + stride, maxPages + 1);
+        const inner = [];
+        for (let n = lastOk + 1; n < hiBase; n++) inner.push(n);
+        if (inner.length) {
+            const innerRes = await Promise.all(inner.map((n) => exists(n)));
+            for (let k = 0; k < innerRes.length; k++) {
+                if (innerRes[k] === true) lastOk = inner[k];
             }
-            if (nl === lo && nh === hi) break;
-            lo = nl; hi = nh;
         }
-
+        let lo = lastOk;
         if (lo < 1) lo = 1;
 
         // ===== v2.27.0 修正：頁數寧可多算，絕不少算 =====
