@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.30.2";
+    version = "2.31.0";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -54,6 +54,33 @@ class Lizimh extends ComicSource {
                 { value: "3", text: "备用 (cf-1.imgio.club)" },
             ],
             default: "auto",
+        },
+        speedTest: {
+            title: "线路测速（点一下，弹出每条线路的延迟）",
+            type: "callback",
+            buttonText: "开始测速",
+            callback: async () => {
+                let lines = [];
+                try {
+                    await this.speedTest();
+                    let order = this._lineOrder || [];
+                    let ms = this._lineMs || {};
+                    for (let k = 0; k < order.length; k++) {
+                        let i = order[k];
+                        let v = ms[i];
+                        let t = (v === undefined || v >= 999999)
+                            ? "不可用"
+                            : (v / 1000).toFixed(2) + " 秒";
+                        lines.push((k === 0 ? "★ " : "   ") + Lizimh.lines[i].name + "：" + t);
+                    }
+                    if (!lines.length) lines.push("没有可测的直连线路");
+                } catch (e) {
+                    lines.push("测速失败：" + String(e));
+                }
+                let msg = "测速结果（快 → 慢）：\n" + lines.join("\n");
+                try { UI.showMessage(msg); } catch (e) {}
+                try { console.log(msg); } catch (e) {}
+            },
         },
         authToken: {
             title: "官方登录凭证 (JWT，选填)",
@@ -301,6 +328,8 @@ class Lizimh extends ComicSource {
                 return { i: i, ms: ok ? dt : 999999 };
             }));
             measured.sort((a, b) => a.ms - b.ms);
+            this._lineMs = {};
+            for (let m of measured) this._lineMs[m.i] = m.ms;
             this._lineOrder = measured.map((r) => r.i).concat(proxy);
             let best = Lizimh.lines[this._lineOrder[0]];
             console.log("[lizimh] 线路测速(仅直连): " + measured.map((r) =>
