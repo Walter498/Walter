@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.33.1";
+    version = "2.33.2";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -671,6 +671,40 @@ class Lizimh extends ComicSource {
         }
     }
 
+    // v2.33.2：背景預取「下一話」——讀者切下一話時就不用現場探測/等接口。
+    // （官方 App 也是這樣做，所以它切話幾乎秒開。）
+    async warmNext(comicId, epId) {
+        try {
+            let order = this._orderCache[String(comicId)];
+            if (!order || !order.length) {
+                await this.chapterCovers(comicId);
+                order = this._orderCache[String(comicId)];
+            }
+            if (!order || !order.length) return;
+            let idx = order.indexOf(String(epId));
+            if (idx < 0 || idx + 1 >= order.length) return;
+            let nextId = order[idx + 1];
+            // ① 有 JWT → 先抓官方順序（最準且不用探測）
+            let ok = false;
+            try {
+                let official = await this.officialPics(nextId);
+                ok = !!(official && official.length);
+            } catch (e) {}
+            if (ok) return;
+            // ② 沒官方 → 至少把頁數快取預熱（背景探測，不阻塞當前章節）
+            let covers = this._coverCache[String(comicId)] || null;
+            let cover = covers ? covers[nextId] : null;
+            if (!cover) return;
+            let m = String(cover).match(/^(.*)\/(\d+)\.([A-Za-z0-9]+)$/);
+            if (!m) return;
+            let dir = m[1], coverPage = parseInt(m[2]) || 1, ext = m[3];
+            let maxPages = 300;
+            try { maxPages = parseInt(this.loadSetting("maxPages") || "300"); } catch (e) {}
+            if (this._verified[m[1]]) return;
+            await this.probePages(dir, ext, maxPages, coverPage);
+        } catch (e) {}
+    }
+
     async chapterCovers(comicId) {
         if (this._coverCache[comicId]) return this._coverCache[comicId];
         let data = await Lizimh.getJson(`/app/api/v2/detail/${comicId}`);
@@ -834,9 +868,13 @@ class Lizimh extends ComicSource {
         this._pageCache[dir] = lo;
         this.persistPages();
         this.scheduleVerify(dir, ext, lo);
+        // 背景預取下一話（fire-and-forget，不阻塞本次回傳）
+        try { this.warmNext(comicId, epId); } catch (e) {}
         let imgs = [];
         for (let i of valid) imgs.push(url(i));
         return imgs;
+    // 背景預取下一話（fire-and-forget，不影響本次回傳）
+    // 放在這裡而不是 loadEp 開頭，是為了讓「當前章節」優先拿到結果。
     }
 
     scheduleVerify(dir, ext, total) {
@@ -989,6 +1027,7 @@ class Lizimh extends ComicSource {
             try {
                 const official = await this.officialPics(epId);
                 if (official && official.length) {
+                    try { this.warmNext(comicId, epId); } catch (e) {}
                     return { images: official };
                 }
             } catch (e) {}
