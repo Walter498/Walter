@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.33.2";
+    version = "2.33.3";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -863,8 +863,23 @@ class Lizimh extends ComicSource {
             }
         }
         lo = scan;
+        // v2.33.3：有些章節的頁碼不是從 1 開始（實測某日漫第1~4頁是 404，
+        // 第 5 頁才開始）→ 舊版固定從 1 開始，第一張圖就 404，閱讀器卡死。
+        // 這裡往前探 1~10 頁，找出第一張真正存在的頁當起點。
+        let firstOk = 1;
+        {
+            const head = [];
+            const headMax = Math.min(10, lo);
+            for (let n = 1; n <= headMax; n++) head.push(n);
+            const headRes = await Promise.all(head.map((n) => exists(n)));
+            let found = 0;
+            for (let k = 0; k < headRes.length; k++) {
+                if (headRes[k] === true) { found = head[k]; break; }
+            }
+            if (found > 0) firstOk = found;
+        }
         let valid = [];
-        for (let i = 1; i <= lo; i++) valid.push(i);
+        for (let i = firstOk; i <= lo; i++) valid.push(i);
         this._pageCache[dir] = lo;
         this.persistPages();
         this.scheduleVerify(dir, ext, lo);
