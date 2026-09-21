@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.33.0";
+    version = "2.33.1";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -408,6 +408,7 @@ class Lizimh extends ComicSource {
             if (res.status !== 200) throw new Error("HTTP " + res.status);
             let json = JSON.parse(res.body);
             if (json.code !== 201) throw new Error("API code " + json.code + ": " + (json.msg || ""));
+            Lizimh._useFallback = false;   // 主域名可用 → 固定用它
             return json.data;
         } catch (e) {
             err1 = e;
@@ -418,7 +419,7 @@ class Lizimh extends ComicSource {
             if (res2.status !== 200) throw new Error("HTTP " + res2.status);
             let json2 = JSON.parse(res2.body);
             if (json2.code !== 201) throw new Error("API code " + json2.code + ": " + (json2.msg || ""));
-            Lizimh._useFallback = !Lizimh._useFallback;   // 記住這次能用的那台
+            Lizimh._useFallback = true;   // 備援可用 → 固定用它（不再翻轉）
             return json2.data;
         } catch (e2) {
             throw err1 || e2;
@@ -613,6 +614,8 @@ class Lizimh extends ComicSource {
     // 有些章節是人工上傳、檔名編號與閱讀順序不一致（例：第153话 官方順序是
     // 1..12, 49, 13, 14...），只有官方接口回的 pics 才是正確順序。
     async officialPics(chapterId) {
+        // 沒有章節 id 就不要發請求（日誌曾出現 chapter/v3/null）
+        if (chapterId === null || chapterId === undefined || String(chapterId) === "") return null;
         let token = "";
         try { token = String(this.loadSetting("authToken") || "").trim(); } catch (e) {}
         if (!token) return null;
@@ -646,7 +649,7 @@ class Lizimh extends ComicSource {
                     res = await Network.get(
                         bases[bi] + "/app/api/chapter/v3/" + chapterId,
                         { "Accept": "application/json", "authorization": token });
-                    if (res && res.status === 200 && bi === 1) Lizimh._useFallback = !Lizimh._useFallback;
+                    if (res && res.status === 200) Lizimh._useFallback = (bi === 1);
                 } catch (e) {
                     res = null;
                 }
