@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.30.0";
+    version = "2.30.2";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -27,8 +27,11 @@ class Lizimh extends ComicSource {
         "http://ai.xajtl.com",
         "http://ai.qsmm.fun",
     ];
-    static _apiIndex = 0;
-    static get api() { return Lizimh.apiHosts[Lizimh._apiIndex % Lizimh.apiHosts.length]; }
+    static _apiIndex = -1;   // -1 = 未決定；第一次成功後記住並持久化
+    static get api() {
+        const i = Lizimh._apiIndex < 0 ? 0 : Lizimh._apiIndex;
+        return Lizimh.apiHosts[i % Lizimh.apiHosts.length];
+    }
     // 圖片線路 (初始化時從 configv2 的 generators 覆蓋)
     // 每條線路: {name, url, proxy?, src?}  proxy=true 表示 url 是代理前綴, 真實圖床是 src
     static lines = [
@@ -282,21 +285,21 @@ class Lizimh extends ComicSource {
             (Lizimh.lines[i].proxy ? proxy : direct).push(i);
         }
         if (direct.length) {
-            let measured = [];
-            for (let i of direct) {
+            // v2.30.1：改成【並行】測速 + 短超時（原本逐條等 2.5 秒，
+            // 有斷線線路時光是測速就要好幾秒 → 使用者感覺「載入慢成狗」）
+            let measured = await Promise.all(direct.map(async (i) => {
                 let t0 = Date.now();
                 let ok = false;
                 try {
                     let res = await Promise.race([
                         Network.sendRequest("HEAD", Lizimh.lines[i].url + "/", {}),
-                        this.sleep(2500).then(() => null),
+                        this.sleep(800).then(() => null),
                     ]);
                     ok = res && res.status && res.status < 500;
                 } catch (e) { ok = false; }
                 let dt = Date.now() - t0;
-                measured.push({ i: i, ms: ok ? dt : 999999 });
-                await this.sleep(60);
-            }
+                return { i: i, ms: ok ? dt : 999999 };
+            }));
             measured.sort((a, b) => a.ms - b.ms);
             this._lineOrder = measured.map((r) => r.i).concat(proxy);
             let best = Lizimh.lines[this._lineOrder[0]];
@@ -381,7 +384,10 @@ class Lizimh extends ComicSource {
                 if (res.status !== 200) throw new Error(`HTTP ${res.status}`);
                 let json = JSON.parse(res.body);
                 if (json.code !== 201) throw new Error(`API code ${json.code}: ${json.msg || ""}`);
-                Lizimh._apiIndex = idx;      // 記住這台可用
+                if (Lizimh._apiIndex !== idx) {
+                    Lizimh._apiIndex = idx;
+                    try { ComicSource.find(Lizimh.key).saveData("apiIndex", String(idx)); } catch (e) {}
+                }
                 return json.data;
             } catch (e) {
                 lastErr = e;
@@ -566,6 +572,16 @@ class Lizimh extends ComicSource {
         } catch (e) {}
     }
 
+    loadApiIndex() {
+        try {
+            let v = this.loadData("apiIndex");
+            if (v !== null && v !== undefined && v !== "") {
+                let i = parseInt(v, 10);
+                if (!isNaN(i) && i >= 0 && i < Lizimh.apiHosts.length) Lizimh._apiIndex = i;
+            }
+        } catch (e) {}
+    }
+
     loadPersistedPages() {
         try {
             let raw = this.loadData("pageCounts");
@@ -584,6 +600,11 @@ class Lizimh extends ComicSource {
         try { token = String(this.loadSetting("authToken") || "").trim(); } catch (e) {}
         if (!token) return null;
         let key = "officialPics_" + String(chapterId);
+        // 失敗冷卻：接口掛掉/限流時不要每開一章都卡一次
+        try {
+            let until = parseInt(this.loadData("officialPicsCooldown") || "0", 10) || 0;
+            if (Date.now() < until) return null;
+        } catch (e) {}
         if (this._officialCache[String(chapterId)]) {
             return this._officialCache[String(chapterId)].slice();
         }
@@ -605,13 +626,21 @@ class Lizimh extends ComicSource {
             for (let i = 0; i < hosts.length && (!res || res.status !== 200); i++) {
                 const idx = (Lizimh._apiIndex + i) % hosts.length;
                 try {
-                    res = await Network.get(
-                        hosts[idx] + "/app/api/chapter/v3/" + chapterId,
-                        { "Accept": "application/json", "authorization": token });
+                    // 2 秒超時：拿不到就別卡住閱讀，改用檔名順序
+                    res = await Promise.race([
+                        Network.get(
+                            hosts[idx] + "/app/api/chapter/v3/" + chapterId,
+                            { "Accept": "application/json", "authorization": token }),
+                        this.sleep(2000).then(() => null),
+                    ]);
                     if (res && res.status === 200) Lizimh._apiIndex = idx;
                 } catch (e) {
                     res = null;
                 }
+            }
+            if (!res || res.status !== 200) {
+                try { this.saveData("officialPicsCooldown", String(Date.now() + 10 * 60 * 1000)); } catch (e) {}
+                return null;
             }
             if (!res || res.status !== 200) return null;
             let data = JSON.parse(res.body);
