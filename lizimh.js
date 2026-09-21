@@ -410,6 +410,7 @@ class Lizimh extends ComicSource {
     async init() {
         this.loadPersistedPages();
         this.loadPersistedVerified();
+        this.loadApiIndex();
         try {
             let data = await Lizimh.getJson("/app/api/configv2");
             let g = data.cfg_general || {};
