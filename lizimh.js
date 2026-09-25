@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.33.3";
+    version = "2.33.4";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -555,7 +555,7 @@ class Lizimh extends ComicSource {
                 try { this.saveData("officialPics_" + cid, ""); } catch (e) {}
             }
         }
-        try { delete this._coverCache[id]; delete this._orderCache[id]; } catch (e) {}
+        try { delete this._coverCache[id]; delete this._orderCache[id]; delete this._epMap[id]; delete this._coverById[id]; } catch (e) {}
         // 保險：任何路徑剛好含此 id 的也清掉
         for (let dir in this._pageCache) {
             if (dir.indexOf(id) >= 0) {
@@ -573,8 +573,12 @@ class Lizimh extends ComicSource {
 
     // 章節封面快取: comicId -> {chapterId: coverPath}
     _coverCache = {};
-    // 章節順序: comicId -> [chapterId...]
+    // 章節順序: comicId -> [章節序號 key...]
     _orderCache = {};
+    // 章節序號 key -> 真正章節 id（v2.33.4：key 改用序號，見 loadInfo 註解）
+    _epMap = {};
+    // 真正章節 id -> 封面路徑（舊資料 / 舊 epId 回退用）
+    _coverById = {};
     // 章節頁數快取: dir -> pageCount (記憶體)
     _pageCache = {};
 
@@ -671,6 +675,15 @@ class Lizimh extends ComicSource {
         }
     }
 
+    // v2.33.4：epId（章節序號 key）→ 真正章節 id。
+    // 舊資料（歷史紀錄／下載佇列裡存的是章節 id）沒有對應就原樣返回，
+    // 這樣舊書籤照樣能載入，只是顯示位置按序號算。
+    resolveEp(comicId, epId) {
+        const m = this._epMap[String(comicId)];
+        const k = String(epId);
+        return (m && m[k]) ? m[k] : k;
+    }
+
     // v2.33.2：背景預取「下一話」——讀者切下一話時就不用現場探測/等接口。
     // （官方 App 也是這樣做，所以它切話幾乎秒開。）
     async warmNext(comicId, epId) {
@@ -709,8 +722,14 @@ class Lizimh extends ComicSource {
         if (this._coverCache[comicId]) return this._coverCache[comicId];
         let data = await Lizimh.getJson(`/app/api/v2/detail/${comicId}`);
         let map = {};
+        const epMap = this._epMap[String(comicId)] || null;
+        const rev = {};
+        if (epMap) for (let k in epMap) rev[epMap[k]] = k;
         for (let ch of data.chapters || []) {
-            if (ch.cover) map[String(ch.id)] = ch.cover;
+            if (ch.cover) {
+                const cid = String(ch.id);
+                map[rev[cid] || cid] = ch.cover;
+            }
         }
         this._coverCache[comicId] = map;
         return map;
@@ -998,16 +1017,38 @@ class Lizimh extends ComicSource {
             let chapters = {};
             let covers = {};
             let chapterCovers = {};
-            let list = (data.chapters || []).slice().sort((a, b) => a.order - b.order);
+            // v2.33.4 關鍵修正：章節 key 必須是「章節序號」，不能是章節 id。
+            // ECMAScript 規定物件 key 只要是整數字串，列舉時一律按【數值升序】，
+            // 插入順序完全無效 —— 用章節 id 當 key 時，後期補上/重傳的章節
+            // （id 比前後都大）會被自動搬到後面，造成章節清單亂序。
+            // 實測「魔皇大管家」：原順序 72,73,74… 變成 72,74,…,85,
+            // 《通知》,89,91,[73,83,86,87,88,90],92…（正是使用者看到的樣子）
+            const numOf = (ch) => {
+                let o = parseInt(ch.order);
+                if (isFinite(o) && o > 0) return o;
+                const m = String(ch.name || "").match(/第\s*(\d+)\s*[话話]/);
+                return m ? parseInt(m[1]) : 0;
+            };
+            let raw = (data.chapters || []).slice();
+            raw.sort((a, b) => (numOf(a) || 1e9) - (numOf(b) || 1e9));
             let order = [];
+            let epMap = {};
+            let coverById = {};
+            let prevOrder = 0;
             // 章節封面：源站每個章節都帶一張「該章內頁」路徑（如 /2/58342/2202527/25.jpg），
             // 直接拿它當封面（就是漫畫裡的一張圖）。沒有 cover 的章節沿用最近一張，
             // 這樣「無論如何都有封面」而不是空白 —— 但載入內頁用的 covers 只放真正屬於
             // 該章的路徑，避免探測到別章的目錄。
             let lastCover = "";
-            for (let ch of list) {
-                let key = String(ch.id);
-                chapters[key] = ch.name || `第${ch.order}话`;
+            for (let ch of raw) {
+                let o = numOf(ch);
+                if (!o || o <= prevOrder) o = prevOrder + 1; // key 唯一且嚴格遞增
+                prevOrder = o;
+                let key = String(o);
+                let chId = String(ch.id);
+                epMap[key] = chId;
+                coverById[chId] = ch.cover || "";
+                chapters[key] = ch.name || `第${o}话`;
                 if (ch.cover) {
                     covers[key] = ch.cover;
                     lastCover = ch.cover;
@@ -1015,6 +1056,8 @@ class Lizimh extends ComicSource {
                 if (lastCover) chapterCovers[key] = this.abs(lastCover);
                 order.push(key);
             }
+            this._epMap[String(id)] = epMap;
+            this._coverById[String(id)] = coverById;
             this._coverCache[String(id)] = covers;
             this._orderCache[String(id)] = order;
             let lastIso = list.length ? list[list.length - 1].created_at : "";
@@ -1038,9 +1081,11 @@ class Lizimh extends ComicSource {
         },
 
         loadEp: async (comicId, epId) => {
+            // v2.33.4：epId 現在是章節序號，先換回真正章節 id
+            const chId = this.resolveEp(comicId, epId);
             // v2.29.0：設定了官方憑證 → 直接用官方順序（最準，解決亂序章節）
             try {
-                const official = await this.officialPics(epId);
+                const official = await this.officialPics(chId);
                 if (official && official.length) {
                     try { this.warmNext(comicId, epId); } catch (e) {}
                     return { images: official };
@@ -1048,6 +1093,10 @@ class Lizimh extends ComicSource {
             } catch (e) {}
             let covers = await this.chapterCovers(comicId);
             let cover = covers[String(epId)];
+            if (!cover) {
+                const byId = this._coverById[String(comicId)] || {};
+                cover = byId[chId] || null; // 舊 epId（章節 id）的回退
+            }
             if (!cover) throw new Error("找不到该章节的图片路径");
             // 形如 /102/58342/2fd5.../6c4b.../97.webp 或 /2/59726/2770805/16.jpg
             let m = String(cover).match(/^(.*)\/(\d+)\.([A-Za-z0-9]+)$/);
