@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.33.4";
+    version = "2.33.5";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -1060,7 +1060,7 @@ class Lizimh extends ComicSource {
             this._coverById[String(id)] = coverById;
             this._coverCache[String(id)] = covers;
             this._orderCache[String(id)] = order;
-            let lastIso = list.length ? list[list.length - 1].created_at : "";
+            let lastIso = raw.length ? raw[raw.length - 1].created_at : "";
             let tags = {
                 "作者": (data.author || "").split(",").filter((t) => t),
                 "标签": (data.tags || "").split(",").filter((t) => t),
