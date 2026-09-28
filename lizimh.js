@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.33.6";
+    version = "2.33.7";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -52,46 +52,14 @@ class Lizimh extends ComicSource {
             default: "auto",
         },
         speedTest: {
-            title: "线路测速（点一下，弹出每条线路的延迟）",
-            type: "callback",
-            buttonText: "开始测速",
-            callback: async () => {
-                let lines = [];
-                try {
-                    await this.speedTest();
-                    let order = this._lineOrder || [];
-                    let ms = this._lineMs || {};
-                    for (let k = 0; k < order.length; k++) {
-                        let i = order[k];
-                        let v = ms[i];
-                        let t = (v === undefined || v >= 999999)
-                            ? "不可用"
-                            : (v / 1000).toFixed(2) + " 秒";
-                        lines.push((k === 0 ? "★ " : "   ") + Lizimh.lines[i].name + "：" + t);
-                    }
-                    if (!lines.length) lines.push("没有可测的直连线路");
-                } catch (e) {
-                    lines.push("测速失败：" + String(e));
-                }
-                let msg = "测速结果（快 → 慢）：\n" + lines.join("\n");
-                try { UI.showMessage(msg); } catch (e) {}
-                try { console.log(msg); } catch (e) {}
-            },
+            title: "API 节点延迟（验证有效响应）",
+            type: "callback", buttonText: "开始测速",
+            callback: async () => this.runDiagnosticTest(false),
         },
         imageSpeedTest: {
-            title: "线路详细测速（并行测试图片线路）",
-            type: "callback",
-            buttonText: "开始测速",
-            callback: async () => {
-                const results = await this.imageSpeedTest();
-                const lines = results.map((r, i) => {
-                    const status = r.ok ? `${r.ms}ms` : "连接失败";
-                    return `${i === 0 && r.ok ? "★ " : "   "}${r.name}：${status}`;
-                });
-                try {
-                    UI.showMessage("图片线路测速结果（快 → 慢）：\n" + lines.join("\n"));
-                } catch (e) {}
-            },
+            title: "图片下载测速（会消耗流量）",
+            type: "callback", buttonText: "开始测速",
+            callback: async () => this.runDiagnosticTest(true),
         },
         authToken: {
             title: "官方登录凭证 (JWT，选填)",
@@ -232,28 +200,79 @@ class Lizimh extends ComicSource {
     _imgPath = {};
     _lineOrder = null;   // 測速後的線路優先順序 (索引數組)
 
-    // 並行測試每條圖片線路；只報告延遲，不改變 imageLine 選擇，也不寫入排序快取。
-    // 測試根路徑而非某一部漫畫的圖片，避免測速依賴特定章節是否仍存在。
-    async imageSpeedTest() {
-        const timeoutMs = 4000;
-        const results = await Promise.all(Lizimh.lines.map(async (line) => {
-            const start = Date.now();
-            try {
-                const res = await Promise.race([
-                    Network.sendRequest("HEAD", line.url + "/", {}),
-                    this.sleep(timeoutMs).then(() => null),
-                ]);
-                const ok = !!(res && res.status && res.status < 500);
-                return { name: line.name, ms: ok ? Date.now() - start : 999999, ok };
-            } catch (e) {
-                return { name: line.name, ms: 999999, ok: false };
+    _diagnosticBusy = false;
+
+    async diagnosticTimeout(task, ms) {
+        let timer;
+        try {
+            return await Promise.race([task, new Promise((_, reject) => {
+                timer = setTimeout(() => reject(new Error("超时")), ms);
+            })]);
+        } finally { clearTimeout(timer); }
+    }
+
+    async diagnosticApi(base) {
+        const start = Date.now();
+        const r = await this.diagnosticTimeout(
+            Network.get(base + "/app/api/v2/detail/57229", {Accept: "application/json"}), 6000);
+        if (r.status !== 200) throw new Error("HTTP " + r.status);
+        const j = JSON.parse(r.body);
+        if (j.code !== 201 || !j.data || !Array.isArray(j.data.chapters)) {
+            throw new Error("非有效漫画接口响应");
+        }
+        return {ms: Date.now() - start, data: j.data};
+    }
+
+    async runDiagnosticTest(images) {
+        if (this._diagnosticBusy) { UI.showMessage("测速仍在进行，请稍候"); return; }
+        this._diagnosticBusy = true;
+        let message;
+        try {
+            UI.showMessage(images ? "正在准备同一张样本图片，各线路并行下载…" : "正在并行验证 API 节点…");
+            const bases = [Lizimh.api, Lizimh.apiFallback].filter((v,i,a) => a.indexOf(v) === i);
+            const api = await Promise.all(bases.map(async base => {
+                try { return {base, ok: true, ...await this.diagnosticApi(base)}; }
+                catch (e) { return {base, ok: false, error: String(e)}; }
+            }));
+            api.sort((a,b) => Number(b.ok)-Number(a.ok) || (a.ms||0)-(b.ms||0));
+            if (!images) {
+                message = api.map((r,i) => r.base + "\n" + (r.ok ? r.ms + "ms" + (i===0 ? " ★ 最快" : "") : r.error)).join("\n\n");
+            } else {
+                const available = api.find(r => r.ok);
+                if (!available) throw new Error("API 均不可用，无法取得测试图片；未执行图片测速");
+                const sample = available.data.chapters.find(c => typeof c.cover === "string" && /^\/(?!\/)/.test(c.cover));
+                if (!sample) throw new Error("没有可用的相对路径图片样本");
+                const results = await Promise.all(Lizimh.lines.map(async (line,i) => {
+                    const start = Date.now();
+                    try {
+                        const n = await this.diagnosticTimeout((async () => {
+                            const r = await fetch(this.lineAbs(sample.cover,i), {headers: {"User-Agent": "Mozilla/5.0", "Cache-Control": "no-cache"}});
+                            if (r.status !== 200) throw new Error("HTTP " + r.status);
+                            const bytes = new Uint8Array(await r.arrayBuffer());
+                            const jpg = bytes[0]===255 && bytes[1]===216;
+                            const png = bytes[0]===137 && bytes[1]===80 && bytes[2]===78 && bytes[3]===71;
+                            const webp = bytes[0]===82 && bytes[1]===73 && bytes[8]===87 && bytes[9]===69;
+                            if (bytes.length < 1024 || !(jpg || png || webp)) throw new Error("响应非有效测试图片");
+                            return bytes.length;
+                        })(), 8000);
+                        const ms = Math.max(1,Date.now()-start);
+                        return {i, name:line.name, ok:true, n, ms, rate:n*1000/ms};
+                    } catch (e) { return {i,name:line.name,ok:false,error:String(e)}; }
+                }));
+                results.sort((a,b) => Number(b.ok)-Number(a.ok) || (b.rate||0)-(a.rate||0));
+                message = results.map((r,k) => r.name + "\n" + (r.ok ? (r.rate/1024).toFixed(1) + " KB/s · " + r.ms + "ms · " + (r.n/1024).toFixed(1) + " KB" + (k===0 ? " ★ 最快" : "") : r.error)).join("\n\n");
+                message += "\n\n同一张图片的有效下载速度，含连接耗时；受缓存及并行竞争影响，不代表带宽上限。超时仅停止等待，宿主请求可能仍在完成。";
             }
-        }));
-        results.sort((a, b) => {
-            if (a.ok !== b.ok) return a.ok ? -1 : 1;
-            return a.ms - b.ms;
-        });
-        return results;
+            message += "\n\n仅报告结果，不自动切换线路。";
+        } catch (e) { message = "测速失败：" + String(e); }
+        finally { this._diagnosticBusy = false; }
+        const title = images ? "图片下载测速" : "API 节点延迟";
+        if (typeof UI.showDialog === "function") {
+            UI.showDialog(title, message, [
+                {text: "关闭", callback: () => {}},
+                {text: "重新测试", callback: () => this.runDiagnosticTest(images)},
+            ]);
+        } else { UI.showMessage(message); }
     }
 
     // 當前使用哪條線 (auto 時用測速結果第一條)
