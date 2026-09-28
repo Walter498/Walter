@@ -17,7 +17,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.33.5";
+    version = "2.33.6";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -76,6 +76,21 @@ class Lizimh extends ComicSource {
                 let msg = "测速结果（快 → 慢）：\n" + lines.join("\n");
                 try { UI.showMessage(msg); } catch (e) {}
                 try { console.log(msg); } catch (e) {}
+            },
+        },
+        imageSpeedTest: {
+            title: "线路详细测速（并行测试图片线路）",
+            type: "callback",
+            buttonText: "开始测速",
+            callback: async () => {
+                const results = await this.imageSpeedTest();
+                const lines = results.map((r, i) => {
+                    const status = r.ok ? `${r.ms}ms` : "连接失败";
+                    return `${i === 0 && r.ok ? "★ " : "   "}${r.name}：${status}`;
+                });
+                try {
+                    UI.showMessage("图片线路测速结果（快 → 慢）：\n" + lines.join("\n"));
+                } catch (e) {}
             },
         },
         authToken: {
@@ -216,6 +231,30 @@ class Lizimh extends ComicSource {
     _imgLine = {};
     _imgPath = {};
     _lineOrder = null;   // 測速後的線路優先順序 (索引數組)
+
+    // 並行測試每條圖片線路；只報告延遲，不改變 imageLine 選擇，也不寫入排序快取。
+    // 測試根路徑而非某一部漫畫的圖片，避免測速依賴特定章節是否仍存在。
+    async imageSpeedTest() {
+        const timeoutMs = 4000;
+        const results = await Promise.all(Lizimh.lines.map(async (line) => {
+            const start = Date.now();
+            try {
+                const res = await Promise.race([
+                    Network.sendRequest("HEAD", line.url + "/", {}),
+                    this.sleep(timeoutMs).then(() => null),
+                ]);
+                const ok = !!(res && res.status && res.status < 500);
+                return { name: line.name, ms: ok ? Date.now() - start : 999999, ok };
+            } catch (e) {
+                return { name: line.name, ms: 999999, ok: false };
+            }
+        }));
+        results.sort((a, b) => {
+            if (a.ok !== b.ok) return a.ok ? -1 : 1;
+            return a.ms - b.ms;
+        });
+        return results;
+    }
 
     // 當前使用哪條線 (auto 時用測速結果第一條)
     currentLine() {
