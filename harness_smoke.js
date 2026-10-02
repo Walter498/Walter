@@ -1,6 +1,13 @@
 // lizimh.js 煙霧測試：用真的 API 跑 loadInfo，檢查章節順序與 epId 對應。
 // 用法： node harness_smoke.js <comicId>
 const fs = require('fs');
+const assert = require('assert');
+const crypto = require('crypto');
+global.Convert = {
+  encodeUtf8: (text) => Buffer.from(text, 'utf8'),
+  md5: (bytes) => crypto.createHash('md5').update(Buffer.from(bytes)).digest(),
+  hexEncode: (bytes) => Buffer.from(bytes).toString('hex'),
+};
 
 // ---- 宿主 API 仿真（EZvenera 全域）----
 global.Network = {
@@ -45,5 +52,17 @@ eval(src + '\n;global.__Lizimh = Lizimh;');
   // epId → 真正章節 id 的對應檢查
   const chId = inst.resolveEp(id, keys[10]);
   console.log('第 11 個 key', keys[10], '→ 真章節 id', chId, chId !== keys[10] ? '✅ 有對應' : '❌ 沒對應');
-  console.log(bad <= 15 ? '\n✅ 煙霧測試通過（無 JS key 重排跡象）' : '\n❌ 可能有 key 重排，請檢查');
-})();
+  // Compare the actual API order instead of using a guessed inversion limit.
+  const api = await global.__Lizimh.getJson('/app/api/v2/detail/' + id);
+  const expected = api.chapters.slice().sort((a, b) => a.order - b.order);
+  assert.equal(keys.length, expected.length);
+  assert.equal(new Set(keys).size, keys.length);
+  expected.forEach((ch, i) => {
+    assert.equal(inst.resolveEp(id, keys[i]), String(ch.id));
+    assert.equal(d.chapters[keys[i]], ch.name || `第${ch.order}话`);
+  });
+  console.log('\nPASS: loadInfo, chapter count, exact API order, epId mapping');
+})().catch((error) => {
+  console.error('FAIL:', error.message);
+  process.exitCode = 1;
+});

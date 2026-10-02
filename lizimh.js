@@ -1,23 +1,16 @@
 /** @type {import('./_venera_.js')} */
 
 /**
- * 栗子漫画 (lizimh) 源  v2.23.0
- *
- * API:   http://ai.qsmm.fun      (配置 AES-ECB 解出, 無需簽名)
- * 圖片:  多條線路可選 (配置下發 generators)
- *
- * 新版 (2026-09) 變更與本源的對策:
- *   - 章節接口 v1/v2 返回誘餌數據, v3 需登錄且受閱讀時間限制 (本源不使用)
- *   - 突破: 詳情接口 /app/api/v2/detail/{id} 仍開放, 且章節自帶 cover 路徑
- *           cover = /{scheme}/{comicId}/{dir...}/{page}.{ext}
- *           同目錄下 1..N 頁可直接訪問, 無簽名/無登錄/無閱讀時間限制
- *   - 故: 用 cover 推導目錄, 二分探測總頁數, 直接拼出全部圖片 URL
+ * 栗子漫画 (lizimh) 源 v2.33.8
+ * API requests use the official path + Unix timestamp signature.
+ * Public metadata endpoints do not need an account token. Chapter v3 uses
+ * the user's authToken and remains subject to server account restrictions.
  */
 
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.33.7";
+    version = "2.33.8";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -27,6 +20,43 @@ class Lizimh extends ComicSource {
     static api = "http://ai.xajtl.com";
     static apiFallback = "http://ai.qsmm.fun";
     static _useFallback = false;
+
+    // Application protocol constant, NOT a user's login credential.
+    static signPrefix = "q2sIObYXCp2uBZgCNBlY93J3z67hK0wS";
+
+    static apiHeaders(extra) {
+        return Object.assign({
+            "Accept": "application/json",
+            "User-Agent": "Dart/3.5 (dart:io)",
+        }, extra || {});
+    }
+
+    static signedPath(target, timestamp) {
+        const parts = String(target).split("?");
+        const path = parts[0];
+        const query = (parts.slice(1).join("?") || "").split("&").filter((entry) => {
+            if (!entry) return false;
+            const key = entry.split("=")[0];
+            return key !== "lzsign" && key !== "t";
+        });
+        const addDefault = (key, value) => {
+            if (!query.some((entry) => entry.split("=")[0] === key)) {
+                query.push(key + "=" + encodeURIComponent(value));
+            }
+        };
+        if (path === "/app/api/home/data" || path === "/app/api/configv2") {
+            addDefault("packname", "com.jy.zyds");
+            addDefault("appsign256", "");
+        }
+        if (path === "/app/api/configv2") addDefault("platform", "ios");
+        const t = timestamp === undefined ? String(Math.floor(Date.now() / 1000)) : String(timestamp);
+        if (!/^\d{10}$/.test(t)) throw new Error("Invalid API timestamp");
+        const signature = Convert.hexEncode(Convert.md5(
+            Convert.encodeUtf8(Lizimh.signPrefix + path + t))).toLowerCase();
+        query.push("lzsign=" + signature, "t=" + t);
+        return path + "?" + query.join("&");
+    }
+
 
     // 圖片線路 (初始化時從 configv2 的 generators 覆蓋)
     // 每條線路: {name, url, proxy?, src?}  proxy=true 表示 url 是代理前綴, 真實圖床是 src
@@ -95,19 +125,25 @@ class Lizimh extends ComicSource {
             type: "multiPartPage",
             load: async (page) => {
                 let parts = [];
+                const errors = [];
+                const recordError = (e) => {
+                    const safe = String(e).replace(/https?:\/\/[^\s;()]+/g, "[API]");
+                    if (errors.indexOf(safe) < 0) errors.push(safe);
+                    return null;
+                };
                 // v2.24.0 提速：所有請求同時發射（Promise 並行），總耗時
                 // ≈ 最慢的一個請求，而不是十幾個請求排隊相加。
                 // home/data 只抓一次，推荐池與周期更新共用同一個 Promise。
-                let homeP = Lizimh.getJson("/app/api/home/data").catch(() => null);
+                let homeP = Lizimh.getJson("/app/api/home/data").catch(recordError);
                 let tagP = ["系统", "穿越", "玄幻"].map((tag) =>
                     Lizimh.getJson("/app/api/search/full?q=" + encodeURIComponent(tag) + "&page=1")
                         .then((res) => ({ tag: tag, res: res }))
-                        .catch(() => null)
+                        .catch(recordError)
                 );
-                let rankP = Lizimh.getJson("/app/api/rank/list").catch(() => null);
+                let rankP = Lizimh.getJson("/app/api/rank/list").catch(recordError);
                 let catP = [];
                 for (let p = 1; p <= 6; p++) {
-                    catP.push(Lizimh.getJson("/app/api/category/list?page=" + p).catch(() => null));
+                    catP.push(Lizimh.getJson("/app/api/category/list?page=" + p).catch(recordError));
                 }
 
                 // ① 首页推荐：精選國漫 + 系統/穿越/玄幻 三種題材，合成一個大池子。
@@ -188,7 +224,7 @@ class Lizimh extends ComicSource {
                         }
                     }
                 } catch (e) {}
-                if (!parts.length) throw new Error("探索页加载失败");
+                if (!parts.length) throw new Error("探索页加载失败" + (errors.length ? ": " + errors.slice(0, 2).join("; ") : ""));
                 return parts;
             },
         },
@@ -214,7 +250,7 @@ class Lizimh extends ComicSource {
     async diagnosticApi(base) {
         const start = Date.now();
         const r = await this.diagnosticTimeout(
-            Network.get(base + "/app/api/v2/detail/57229", {Accept: "application/json"}), 6000);
+            Network.get(base + Lizimh.signedPath("/app/api/v2/detail/57229"), Lizimh.apiHeaders()), 6000);
         if (r.status !== 200) throw new Error("HTTP " + r.status);
         const j = JSON.parse(r.body);
         if (j.code !== 201 || !j.data || !Array.isArray(j.data.chapters)) {
@@ -458,30 +494,28 @@ class Lizimh extends ComicSource {
     }
 
     static async getJson(path) {
-        const primary = Lizimh._useFallback ? Lizimh.apiFallback : Lizimh.api;
-        const backup = Lizimh._useFallback ? Lizimh.api : Lizimh.apiFallback;
-        let err1 = null;
-        try {
-            let res = await Network.get(primary + path, { "Accept": "application/json" });
-            if (res.status !== 200) throw new Error("HTTP " + res.status);
-            let json = JSON.parse(res.body);
-            if (json.code !== 201) throw new Error("API code " + json.code + ": " + (json.msg || ""));
-            Lizimh._useFallback = false;   // 主域名可用 → 固定用它
-            return json.data;
-        } catch (e) {
-            err1 = e;
+        const bases = Lizimh._useFallback
+            ? [Lizimh.apiFallback, Lizimh.api]
+            : [Lizimh.api, Lizimh.apiFallback];
+        const failures = [];
+        for (const base of bases) {
+            try {
+                const res = await Network.get(base + Lizimh.signedPath(path), Lizimh.apiHeaders());
+                if (res.status !== 200) throw new Error("HTTP " + res.status);
+                const json = JSON.parse(res.body);
+                if (json.code !== 201) {
+                    throw new Error("API code " + json.code + ": " + (json.msg || ""));
+                }
+                Lizimh._useFallback = base === Lizimh.apiFallback;
+                return json.data;
+            } catch (e) {
+                // Keep credentials and signed query strings out of our errors.
+                const message = String(e);
+                const http = message.match(/HTTP \d{3}/);
+                failures.push(base + ": " + (http ? http[0] : "网络或响应格式错误"));
+            }
         }
-        // 主域名失敗 → 試備援
-        try {
-            let res2 = await Network.get(backup + path, { "Accept": "application/json" });
-            if (res2.status !== 200) throw new Error("HTTP " + res2.status);
-            let json2 = JSON.parse(res2.body);
-            if (json2.code !== 201) throw new Error("API code " + json2.code + ": " + (json2.msg || ""));
-            Lizimh._useFallback = true;   // 備援可用 → 固定用它（不再翻轉）
-            return json2.data;
-        } catch (e2) {
-            throw err1 || e2;
-        }
+        throw new Error("栗子接口请求失败 " + String(path).split("?")[0] + " (" + failures.join("; ") + ")");
     }
 
     static fmtDate(iso) { return iso ? String(iso).substring(0, 10) : ""; }
@@ -680,11 +714,12 @@ class Lizimh extends ComicSource {
         if (chapterId === null || chapterId === undefined || String(chapterId) === "") return null;
         let token = "";
         try { token = String(this.loadSetting("authToken") || "").trim(); } catch (e) {}
+        token = token.replace(/^jwt:\s*/i, "").replace(/^Bearer\s+/i, "").trim();
         if (!token) return null;
         let key = "officialPics_" + String(chapterId);
         // 失敗冷卻：接口掛掉/限流時不要每開一章都卡一次
         try {
-            let until = parseInt(this.loadData("officialPicsCooldown") || "0", 10) || 0;
+            let until = parseInt(this.loadData("officialPicsSignedCooldown") || "0", 10) || 0;
             if (Date.now() < until) return null;
         } catch (e) {}
         if (this._officialCache[String(chapterId)]) {
@@ -709,15 +744,15 @@ class Lizimh extends ComicSource {
             for (let bi = 0; bi < bases.length && (!res || res.status !== 200); bi++) {
                 try {
                     res = await Network.get(
-                        bases[bi] + "/app/api/chapter/v3/" + chapterId,
-                        { "Accept": "application/json", "authorization": token });
-                    if (res && res.status === 200) Lizimh._useFallback = (bi === 1);
+                        bases[bi] + Lizimh.signedPath("/app/api/chapter/v3/" + chapterId),
+                        Lizimh.apiHeaders({ "authorization": token }));
+                    if (res && res.status === 200) Lizimh._useFallback = bases[bi] === Lizimh.apiFallback;
                 } catch (e) {
                     res = null;
                 }
             }
             if (!res || res.status !== 200) {
-                try { this.saveData("officialPicsCooldown", String(Date.now() + 10 * 60 * 1000)); } catch (e) {}
+                try { this.saveData("officialPicsSignedCooldown", String(Date.now() + 10 * 60 * 1000)); } catch (e) {}
                 return null;
             }
             if (!res || res.status !== 200) return null;
@@ -758,7 +793,7 @@ class Lizimh extends ComicSource {
             // ① 有 JWT → 先抓官方順序（最準且不用探測）
             let ok = false;
             try {
-                let official = await this.officialPics(nextId);
+                let official = await this.officialPics(this.resolveEp(comicId, nextId));
                 ok = !!(official && official.length);
             } catch (e) {}
             if (ok) return;
@@ -1139,6 +1174,11 @@ class Lizimh extends ComicSource {
         },
 
         loadEp: async (comicId, epId) => {
+            // A restored reader may load a chapter before loadInfo has run in
+            // this source instance. Rebuild the mapping before resolving it.
+            if (!this._epMap[String(comicId)]) {
+                await this.comic.loadInfo(comicId);
+            }
             // v2.33.4：epId 現在是章節序號，先換回真正章節 id
             const chId = this.resolveEp(comicId, epId);
             // v2.29.0：設定了官方憑證 → 直接用官方順序（最準，解決亂序章節）
