@@ -285,7 +285,14 @@ class Lizimh extends ComicSource {
             }));
             api.sort((a,b) => Number(b.ok)-Number(a.ok) || (a.ms||0)-(b.ms||0));
             if (!images) {
-                message = api.map((r,i) => r.base + "\n" + (r.ok ? r.ms + "ms" + (i===0 ? " ★ 最快" : "") : r.error)).join("\n\n");
+                const shortError = (error) => {
+                    const text = String(error || "");
+                    if (/ENOTFOUND|DNS|lookup address/i.test(text)) return "DNS 不可用";
+                    if (/timeout|超时/i.test(text)) return "连接超时";
+                    const http = text.match(/HTTP \d{3}/);
+                    return http ? http[0] : "连接失败";
+                };
+                message = api.map((r,i) => r.base + "\n" + (r.ok ? r.ms + "ms" + (i===0 ? " ★ 最快" : "") : shortError(r.error))).join("\n\n");
             } else {
                 const available = api.find(r => r.ok);
                 if (!available) throw new Error("API 均不可用，无法取得测试图片；未执行图片测速");
@@ -309,7 +316,7 @@ class Lizimh extends ComicSource {
                     } catch (e) { return {i,name:line.name,ok:false,error:String(e)}; }
                 }));
                 results.sort((a,b) => Number(b.ok)-Number(a.ok) || (b.rate||0)-(a.rate||0));
-                message = results.map((r,k) => r.name + "\n" + (r.ok ? (r.rate/1024).toFixed(1) + " KB/s · " + r.ms + "ms · " + (r.n/1024).toFixed(1) + " KB" + (k===0 ? " ★ 最快" : "") : r.error)).join("\n\n");
+                message = results.map((r,k) => r.name + "\n" + (r.ok ? (r.rate/1024).toFixed(1) + " KB/s · " + r.ms + "ms · " + (r.n/1024).toFixed(1) + " KB" + (k===0 ? " ★ 最快" : "") : /timeout|超时/i.test(String(r.error)) ? "连接超时" : "连接失败")).join("\n\n");
                 message += "\n\n同一张图片的有效下载速度，含连接耗时；受缓存及并行竞争影响，不代表带宽上限。超时仅停止等待，宿主请求可能仍在完成。";
             }
             message += "\n\n仅报告结果，不自动切换线路。";
