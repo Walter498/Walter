@@ -10,7 +10,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.33.8";
+    version = "2.33.9";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -239,12 +239,25 @@ class Lizimh extends ComicSource {
     _diagnosticBusy = false;
 
     async diagnosticTimeout(task, ms) {
-        let timer;
-        try {
-            return await Promise.race([task, new Promise((_, reject) => {
-                timer = setTimeout(() => reject(new Error("超时")), ms);
-            })]);
-        } finally { clearTimeout(timer); }
+        // The host supplies setTimeout without a timer ID or clearTimeout.
+        // Ignore the eventual callback after resolution instead of cancelling it.
+        return new Promise((resolve, reject) => {
+            let settled = false;
+            setTimeout(() => {
+                if (settled) return;
+                settled = true;
+                reject(new Error("超时"));
+            }, ms);
+            Promise.resolve(task).then((value) => {
+                if (settled) return;
+                settled = true;
+                resolve(value);
+            }, (error) => {
+                if (settled) return;
+                settled = true;
+                reject(error);
+            });
+        });
     }
 
     async diagnosticApi(base) {
