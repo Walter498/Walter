@@ -10,7 +10,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.33.13";
+    version = "2.33.14";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -597,6 +597,9 @@ class Lizimh extends ComicSource {
             ? [Lizimh.apiFallback, Lizimh.api]
             : [Lizimh.api, Lizimh.apiFallback];
         const failures = [];
+        // DNS and TLS failures on this host are intermittent; retry each host
+        // once with a short delay before reporting a network error.
+        const wait = (ms) => new Promise((r) => setTimeout(() => r(null), ms));
         for (const base of bases) {
             try {
                 const res = await Network.get(base + Lizimh.signedPath(path), Lizimh.apiHeaders());
@@ -609,8 +612,25 @@ class Lizimh extends ComicSource {
                 return json.data;
             } catch (e) {
                 // Keep credentials and signed query strings out of our errors.
-                const message = String(e);
+                let message = String(e);
                 const http = message.match(/HTTP \d{3}/);
+                if (!http) {
+                    await wait(600);
+                    try {
+                        const retry = await Network.get(
+                            base + Lizimh.signedPath(path), Lizimh.apiHeaders());
+                        if (retry.status === 200) {
+                            const json2 = JSON.parse(retry.body);
+                            if (json2.code === 201) {
+                                Lizimh._useFallback = base === Lizimh.apiFallback;
+                                return json2.data;
+                            }
+                        }
+                        message = message + " (retry failed)";
+                    } catch (e2) {
+                        message = message + " (retry failed)";
+                    }
+                }
                 failures.push(base + ": " + (http ? http[0] : "网络或响应格式错误"));
             }
         }
