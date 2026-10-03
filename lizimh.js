@@ -10,7 +10,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.33.17";
+    version = "2.33.18";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -574,18 +574,29 @@ class Lizimh extends ComicSource {
                 if (token) headers["authorization"] = token;
                 // Without a bound a stalled POST leaves the app waiting forever
                 // with no error, which looks like a dead button.
+                // The host serialises objects itself; sending a raw string made
+                // the server answer 400 "请求参数解析失败".
+                let payload = body;
+                try { payload = JSON.parse(String(body)); } catch (e) {}
                 const res = await Promise.race([
                     Network.sendRequest(
                         "POST",
                         base + Lizimh.signedPath(path),
                         headers,
-                        String(body),
+                        payload,
                     ),
                     new Promise((resolve) => setTimeout(
                         () => resolve({ status: 0, body: "" }), 15000)),
                 ]);
                 if (!res || res.status !== 200) {
-                    last = res && res.status === 0 ? "請求超時" : ("HTTP " + (res ? res.status : "?"));
+                    let detail = "";
+                    try {
+                        const parsed = JSON.parse(res && res.body ? res.body : "");
+                        if (parsed && parsed.msg) detail = "：" + parsed.msg;
+                    } catch (e) {}
+                    last = res && res.status === 0
+                        ? "請求超時"
+                        : ("HTTP " + (res ? res.status : "?") + detail);
                     continue;
                 }
                 const parsed = JSON.parse(res.body);
