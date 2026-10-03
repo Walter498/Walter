@@ -10,7 +10,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.33.15";
+    version = "2.33.16";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -571,14 +571,20 @@ class Lizimh extends ComicSource {
                     "User-Agent": "Dart/3.5 (dart:io)",
                 };
                 if (token) headers["authorization"] = token;
-                const res = await Network.sendRequest(
-                    "POST",
-                    base + Lizimh.signedPath(path),
-                    headers,
-                    String(body),
-                );
+                // Without a bound a stalled POST leaves the app waiting forever
+                // with no error, which looks like a dead button.
+                const res = await Promise.race([
+                    Network.sendRequest(
+                        "POST",
+                        base + Lizimh.signedPath(path),
+                        headers,
+                        String(body),
+                    ),
+                    new Promise((resolve) => setTimeout(
+                        () => resolve({ status: 0, body: "" }), 15000)),
+                ]);
                 if (!res || res.status !== 200) {
-                    last = "HTTP " + (res ? res.status : "?");
+                    last = res && res.status === 0 ? "請求超時" : ("HTTP " + (res ? res.status : "?"));
                     continue;
                 }
                 const parsed = JSON.parse(res.body);
