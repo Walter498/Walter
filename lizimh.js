@@ -10,7 +10,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.33.10";
+    version = "2.33.11";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -90,6 +90,38 @@ class Lizimh extends ComicSource {
             title: "图片下载测速（会消耗流量）",
             type: "callback", buttonText: "开始测速",
             callback: async () => this.runDiagnosticTest(true),
+        },
+        communityCheck: {
+            title: "接口自檢（社區／首頁）",
+            type: "callback",
+            buttonText: "開始檢查",
+            callback: async () => {
+                const lines = [];
+                const check = async (label, path) => {
+                    try {
+                        const data = await Lizimh.getJson(path);
+                        const n = data && data.list ? data.list.length : "-";
+                        lines.push(label + "：OK，項目數 " + n);
+                    } catch (e) {
+                        let msg = String(e);
+                        const http = msg.match(/HTTP \d{3}/);
+                        const code = msg.match(/API code \d+/);
+                        lines.push(label + "：" + (http ? http[0] : code ? code[0] : "失敗"));
+                    }
+                };
+                await check("健康檢查", "/app/api/health");
+                await check("社區帖子", "/app/api/community/posts?page_size=10&sort_type=0");
+                await check("首頁", "/app/api/home/data");
+                const text = "栗子接口自檢：\n" + lines.join("\n");
+                if (typeof UI.showDialog === "function") {
+                    UI.showDialog("接口自檢", text, [
+                        {text: "關閉", callback: () => {}},
+                        {text: "重新檢查", callback: () => this.loadSetting("communityCheck")},
+                    ]);
+                } else {
+                    UI.showMessage(text);
+                }
+            },
         },
         authToken: {
             title: "官方登录凭证 (JWT，选填)",
