@@ -10,7 +10,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.33.14";
+    version = "2.33.15";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -552,7 +552,9 @@ class Lizimh extends ComicSource {
     apiFetch = async (path, body) => {
         const hasBody = body !== undefined && body !== null && String(body) !== "";
         if (!hasBody) {
-            return JSON.stringify(await Lizimh.getJson(path));
+            // Must match the {code,data} envelope the app parses; getJson
+            // already unwrapped it, so wrap it back.
+            return JSON.stringify({ code: 201, data: await Lizimh.getJson(path) });
         }
         let token = "";
         try { token = String(this.loadSetting("authToken") || "").trim(); } catch (e) {}
