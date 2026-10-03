@@ -10,7 +10,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.33.11";
+    version = "2.33.12";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -544,6 +544,10 @@ class Lizimh extends ComicSource {
             description: c.content || "",
         });
     }
+
+    // The app calls this (via the JS bridge) to fetch through the source's own
+    // request path, which this host accepts where the app's client is rejected.
+    apiFetch = async (path) => JSON.stringify(await Lizimh.getJson(path));
 
     static async getJson(path) {
         const bases = Lizimh._useFallback
