@@ -10,7 +10,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.33.20";
+    version = "2.33.19";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -741,31 +741,14 @@ class Lizimh extends ComicSource {
     };
 
     categoryComics = {
-        // v2.33.20：標籤／地區／狀態一律交由服務器篩選（tag=/class=/isend=），
-        // 只取當前分頁；若服務器回傳 total/maxPage 就原樣帶出，供 App 顯示
-        // 總數。不在本機掃描全部漫畫，也不偽造精確數量。
         load: async (category, param, options, page) => {
             let comics = [];
             let p = page || 1;
-            let total = null;
-            let serverMax = null;
-            const readTotal = (data) => {
-                const raw = data.total ?? data.count;
-                const n = Number(raw);
-                return isNaN(n) ? null : n;
-            };
-            const readMaxPage = (data) => {
-                const raw = data.maxPage ?? data.max_page ?? data.total_page
-                    ?? data.totalPage ?? data.pages;
-                const n = Number(raw);
-                return isNaN(n) ? null : n;
-            };
             if (param === "rank") {
                 let data = await Lizimh.getJson("/app/api/rank/list");
                 for (let g of data.rank_list || []) {
                     comics.push(...(g.comic_list || []).map((c) => this.parseComic(c)));
                 }
-                total = comics.length;
             } else {
                 // v2.25.0：支援組合篩選 "tag:格斗|class:3|isend:0" + 分頁，
                 // 供 App 分類頁（篩選 chips + 即時網格）多條件查詢使用。
@@ -775,25 +758,19 @@ class Lizimh extends ComicSource {
                     else if (seg.startsWith("class:")) qsParts.push("class=" + seg.substring(6));
                     else if (seg.startsWith("isend:")) qsParts.push("isend=" + seg.substring(6));
                 }
-                let data = qsParts.length
-                    ? await Lizimh.getJson(`/app/api/category/list?${qsParts.join("&")}&page=${p}`)
-                    : await Lizimh.getJson(`/app/api/category/list?page=${p}`);
-                comics = (data.category_list || []).map((c) => this.parseComic(c));
-                // 只有服務器明確給出總數／總頁數才採用；沒給就維持
-                // 「抓到空頁即到底」的原行為，不憑猜測生成數字。
-                total = readTotal(data);
-                serverMax = readMaxPage(data);
-                if (serverMax === null && total !== null && comics.length > 0) {
-                    serverMax = Math.ceil(total / comics.length);
+                if (qsParts.length) {
+                    let data = await Lizimh.getJson(`/app/api/category/list?${qsParts.join("&")}&page=${p}`);
+                    comics = (data.category_list || []).map((c) => this.parseComic(c));
+                } else {
+                    // v2.25.1：「全部」（沒有任何篩選條件）= 未篩選的分類總列表
+                    let data = await Lizimh.getJson(`/app/api/category/list?page=${p}`);
+                    comics = (data.category_list || []).map((c) => this.parseComic(c));
                 }
             }
             let seen = new Set();
             comics = comics.filter((c) => !seen.has(c.id) && seen.add(c.id));
-            // 沒有服務器總數時，只能：本頁非空就允許下一頁，抓到空頁即到底。
-            const maxPage = serverMax !== null
-                ? serverMax
-                : (comics.length ? p + 1 : p);
-            return { comics: comics, maxPage: maxPage, total: total };
+            // 非空就允許繼續翻頁（抓回空頁即到底）
+            return { comics: comics, maxPage: comics.length ? p + 1 : p };
         },
     };
 
