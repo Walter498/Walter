@@ -10,7 +10,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.33.12";
+    version = "2.33.13";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -545,9 +545,52 @@ class Lizimh extends ComicSource {
         });
     }
 
-    // The app calls this (via the JS bridge) to fetch through the source's own
-    // request path, which this host accepts where the app's client is rejected.
-    apiFetch = async (path) => JSON.stringify(await Lizimh.getJson(path));
+    // The app calls this (via the JS bridge) to use the source's own request
+    // path, which this host accepts where the app's client is rejected.
+    // body == null  -> GET; otherwise POST with the user's token (writes need
+    // the same authorization the official client sends).
+    apiFetch = async (path, body) => {
+        const hasBody = body !== undefined && body !== null && String(body) !== "";
+        if (!hasBody) {
+            return JSON.stringify(await Lizimh.getJson(path));
+        }
+        let token = "";
+        try { token = String(this.loadSetting("authToken") || "").trim(); } catch (e) {}
+        token = token.replace(/^jwt:\s*/i, "").replace(/^Bearer\s+/i, "").trim();
+        const bases = Lizimh._useFallback
+            ? [Lizimh.apiFallback, Lizimh.api]
+            : [Lizimh.api, Lizimh.apiFallback];
+        let last = "請求失敗";
+        for (const base of bases) {
+            try {
+                const headers = {
+                    "Accept": "application/json",
+                    "Content-Type": "application/json; charset=utf-8",
+                    "User-Agent": "Dart/3.5 (dart:io)",
+                };
+                if (token) headers["authorization"] = token;
+                const res = await Network.sendRequest(
+                    "POST",
+                    base + Lizimh.signedPath(path),
+                    headers,
+                    String(body),
+                );
+                if (!res || res.status !== 200) {
+                    last = "HTTP " + (res ? res.status : "?");
+                    continue;
+                }
+                const parsed = JSON.parse(res.body);
+                if (parsed.code !== 201 && parsed.code !== 200) {
+                    throw new Error(parsed.msg || ("API code " + parsed.code));
+                }
+                Lizimh._useFallback = base === Lizimh.apiFallback;
+                return JSON.stringify({ code: 201, data: parsed.data || {} });
+            } catch (e) {
+                last = String(e && e.message ? e.message : e);
+            }
+        }
+        throw new Error(last);
+    };
 
     static async getJson(path) {
         const bases = Lizimh._useFallback
