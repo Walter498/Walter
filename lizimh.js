@@ -10,7 +10,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.33.18";
+    version = "2.33.19";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -578,16 +578,27 @@ class Lizimh extends ComicSource {
                 // the server answer 400 "请求参数解析失败".
                 let payload = body;
                 try { payload = JSON.parse(String(body)); } catch (e) {}
-                const res = await Promise.race([
+                const send = (data, extraHeaders) => Promise.race([
                     Network.sendRequest(
                         "POST",
                         base + Lizimh.signedPath(path),
-                        headers,
-                        payload,
+                        Object.assign({}, headers, extraHeaders || {}),
+                        data,
                     ),
                     new Promise((resolve) => setTimeout(
                         () => resolve({ status: 0, body: "" }), 15000)),
                 ]);
+                let res = await send(payload);
+                if (res && res.status === 400 && payload && typeof payload === "object") {
+                    // The server may expect a form body; retry once that way.
+                    const form = Object.keys(payload).map((k) =>
+                        encodeURIComponent(k) + "=" +
+                        encodeURIComponent(String(payload[k]))).join("&");
+                    const retry = await send(form, {
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    });
+                    if (retry && retry.status === 200) res = retry;
+                }
                 if (!res || res.status !== 200) {
                     let detail = "";
                     try {
