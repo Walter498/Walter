@@ -10,7 +10,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.33.16";
+    version = "2.33.17";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -559,9 +559,10 @@ class Lizimh extends ComicSource {
         let token = "";
         try { token = String(this.loadSetting("authToken") || "").trim(); } catch (e) {}
         token = token.replace(/^jwt:\s*/i, "").replace(/^Bearer\s+/i, "").trim();
-        const bases = Lizimh._useFallback
-            ? [Lizimh.apiFallback, Lizimh.api]
-            : [Lizimh.api, Lizimh.apiFallback];
+        // Writes always try the primary host first; the fallback host's DNS
+        // has been dead, and a stale _useFallback flag used to send every POST
+        // straight at it.
+        const bases = [Lizimh.api, Lizimh.apiFallback];
         let last = "請求失敗";
         for (const base of bases) {
             try {
