@@ -10,7 +10,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.33.19";
+    version = "2.33.20";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -771,6 +771,22 @@ class Lizimh extends ComicSource {
             comics = comics.filter((c) => !seen.has(c.id) && seen.add(c.id));
             // 非空就允許繼續翻頁（抓回空頁即到底）
             return { comics: comics, maxPage: comics.length ? p + 1 : p };
+        },
+        // Structured filter adapter used by the app category page. The API
+        // already supports repeated tag/class/isend parameters; keep the
+        // source-native values and let the server apply all selected rows.
+        loadWithFilters: async (request) => {
+            const filters = Array.isArray(request && request.filters)
+                ? request.filters : [];
+            const options = Array.isArray(request && request.options)
+                ? request.options : [];
+            const page = Number(request && request.page) || 1;
+            const params = filters
+                .map((f) => String(f.param || ''))
+                .filter((p) => p && p !== 'rank');
+            return await this.categoryComics.load(
+                filters.length ? String(filters[0].category || '分類') : '分類',
+                params.join('|'), options, page);
         },
     };
 
