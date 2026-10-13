@@ -11,7 +11,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.33.20-comments.1";
+    version = "2.33.20-comments.2";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/feat/lizimh-tencent-comments-20261013/lizimh.js";
 
@@ -71,11 +71,11 @@ class Lizimh extends ComicSource {
 
     settings = {
         tencentCommentsEnabled: {
-            title: "腾讯章节评论", type: "select",
+            title: "腾讯评论（作品讨论/章节评论）", type: "select",
             options: [{value: "on", text: "开启"}, {value: "off", text: "关闭"}], default: "on",
         },
         tencentCommentSort: {
-            title: "腾讯评论排序", type: "select",
+            title: "腾讯章节评论排序", type: "select",
             options: [{value: "new", text: "新评"}, {value: "hot", text: "热评"}, {value: "wonderful", text: "精彩评论"}], default: "new",
         },
         tencentCommentBindings: {
@@ -1285,6 +1285,13 @@ class Lizimh extends ComicSource {
     }
 
     comic = {
+        // Real work discussions, separate from chapter comments. Shared provider/pool.
+        loadComments: async (comicId, subId, page, replyTo) => {
+            if (!this._tencentChapterComments) {
+                this._tencentChapterComments = new LiziTencentComments(this, TencentChapterCrypto);
+            }
+            return this._tencentChapterComments.loadWork(comicId, subId, page, replyTo);
+        },
         // Independent read-only provider; original reading functions unchanged.
         loadChapterComments: async (comicId, epId, page, replyTo) => {
             if (!this._tencentChapterComments) {
@@ -1999,7 +2006,10 @@ class LiziTencentComments {
         incomplete: '腾讯搜索结果完整性无法确认，请在评论作品绑定中手动确认腾讯作品ID',
         chapter: '该章节未能唯一匹配腾讯目录，暂不显示评论',
         repeated: '腾讯评论分页返回重复内容，已停止继续加载',
-        limit: '腾讯评论分页已达安全上限，已停止继续加载'
+        limit: '腾讯评论分页已达安全上限，已停止继续加载',
+        workDisabled: '腾讯作品讨论已停用', workInput: '作品讨论参数无效',
+        workTimeout: '腾讯作品讨论加载超时，请稍后重试',
+        workLocal: '无法获取栗子作品标题，请重新打开作品详情'
     };
     fail(code) {
         const e = new Error(LiziTencentComments.messages[code] || LiziTencentComments.messages.schema);
@@ -2007,19 +2017,19 @@ class LiziTencentComments {
         return e;
     }
     check(ctx) {
-        if (ctx.expired || Date.now() >= ctx.end) { ctx.expired = true; throw this.fail('timeout'); }
+        if (ctx.expired || Date.now() >= ctx.end) { ctx.expired = true; throw this.fail(ctx.workOnly ? 'workTimeout' : 'timeout'); }
     }
-    settings() {
+    settings(workOnly = false) {
         let enabled, sort, raw;
         try {
             enabled = this.source.loadSetting('tencentCommentsEnabled');
-            sort = this.source.loadSetting('tencentCommentSort');
+            sort = workOnly ? 'website-default' : this.source.loadSetting('tencentCommentSort');
             raw = this.source.loadSetting('tencentCommentBindings');
         } catch (_) { throw this.fail('settings'); }
         if (enabled === 'off' || enabled === false || enabled === 'false' || enabled === 'disabled' || enabled === '0' || enabled === 0) throw this.fail('disabled');
         if (enabled != null && !['on', '', true, 'true', '1', 1].includes(enabled)) throw this.fail('settings');
         sort = sort == null || sort === '' ? 'new' : String(sort);
-        if (!['new', 'hot', 'wonderful'].includes(sort)) throw this.fail('settings');
+        if (!workOnly && !['new', 'hot', 'wonderful'].includes(sort)) throw this.fail('settings');
         let bindings = {};
         if (raw != null && raw !== '') {
             try { bindings = typeof raw === 'string' ? JSON.parse(raw) : raw; } catch (_) { throw this.fail('settings'); }
@@ -2027,6 +2037,140 @@ class LiziTencentComments {
             for (const k of Object.keys(bindings)) if (!/^\d{1,20}$/.test(k) || !/^\d{1,20}$/.test(String(bindings[k]))) throw this.fail('settings');
         }
         return { sort, bindings };
+    }
+    // Work discussion is separate from load()/chapter comments. subId is opaque host metadata.
+    async loadWork(comicId, subId, page, replyTo) {
+        let settings;
+        try { settings = this.settings(true); }
+        catch (e) { throw e.message === LiziTencentComments.messages.disabled ? this.fail('workDisabled') : e; }
+        if (replyTo != null && replyTo !== '') throw this.fail('reply');
+        comicId = String(comicId);
+        if (!/^\d{1,20}$/.test(comicId)) throw this.fail('workInput');
+        page = page == null ? 1 : Number(page);
+        if (!Number.isSafeInteger(page) || page < 1) throw this.fail('workInput');
+        if (page > 500) throw this.fail('limit');
+        const bound = Object.prototype.hasOwnProperty.call(settings.bindings, comicId) ? String(settings.bindings[comicId]) : null;
+        // subId is deliberately NOT a chapter ID, topic ID or request parameter.
+        const key = JSON.stringify(['loadWork', comicId, page, 'website-default', bound]);
+        let promise = this.flights.get(key);
+        if (!promise) {
+            if (this.flights.size >= 16) throw this.fail('busy');
+            const ctx = { end: Date.now() + this.deadlineMs, expired: false, workOnly: true };
+            let done = false;
+            promise = new Promise((resolve, reject) => {
+                const timer = setTimeout(() => {
+                    if (!done) { ctx.expired = true; done = true; reject(this.fail('workTimeout')); }
+                }, this.deadlineMs);
+                Promise.resolve().then(async () => {
+                    const local = await this.localWork(ctx, comicId);
+                    const work = await this.bindingWork(ctx, comicId, local, bound);
+                    return this.workComments(ctx, work.id, page);
+                }).then(
+                    value => { if (!done) { done = true; resolve(value); } },
+                    error => { if (!done) { done = true; reject(error && error.liziCommentError ? error : this.fail('schema')); } }
+                ).then(() => {
+                    // clearTimeout is optional in older hosts; safe timer closure is already marked done.
+                    if (typeof clearTimeout === 'function') clearTimeout(timer);
+                    this.flights.delete(key);
+                });
+            });
+            this.flights.set(key, promise);
+        }
+        const result = await promise;
+        return { comments: result.comments.map(x => new Comment(Object.assign({}, x))), maxPage: result.maxPage };
+    }
+    async localWork(ctx, comicId) {
+        return this.cached(ctx, JSON.stringify(['workLocal', comicId]), async () => {
+            let info, pending = this.localFlights.get(comicId);
+            if (!pending) {
+                pending = this.slot(ctx, () => this.source.comic.loadInfo(comicId));
+                this.localFlights.set(comicId, pending);
+                pending.then(() => this.localFlights.delete(comicId), () => this.localFlights.delete(comicId));
+            }
+            try { info = await pending; } catch (_) { this.check(ctx); throw this.fail('workLocal'); }
+            this.check(ctx);
+            const title = LiziTencentComments.text(info && info.title);
+            if (!title) throw this.fail('workLocal');
+            // No catalog/author/chapter gate for a work discussion.
+            return { title };
+        });
+    }
+    async remoteWork(ctx, id) {
+        return this.cached(ctx, JSON.stringify(['workRemote', id]), async () => {
+            const body = await this.get(ctx, 'https://m.ac.qq.com/comic/index/id/' + id, this.metadataHeaders());
+            const doc = new HtmlDocument(body);
+            let title;
+            try { title = LiziTencentComments.text(doc.querySelector('.head-title-tags h1')?.text || doc.querySelector('h1')?.text); }
+            finally { doc.dispose(); }
+            if (!title) throw this.fail('work');
+            return { id, title };
+        });
+    }
+    async bindingWork(ctx, comicId, local, bound) {
+        return this.cached(ctx, JSON.stringify(['workBinding', comicId, local.title, bound]), async () => {
+            const titleKey = LiziTencentComments.titleKey(local.title);
+            if (bound) {
+                const work = await this.remoteWork(ctx, bound);
+                if (LiziTencentComments.titleKey(work.title) !== titleKey) throw this.fail('work');
+                return work;
+            }
+            // Search policy is supplied by the shared search() owner (bounded first-page title-only).
+            // One observed exact-title candidate is NOT a claim of global search exhaustion.
+            const candidates = await this.search(ctx, local.title);
+            const exact = candidates.filter(x => LiziTencentComments.titleKey(x.title) === titleKey);
+            if (exact.length !== 1) throw this.fail('work');
+            const work = await this.remoteWork(ctx, exact[0].id);
+            if (LiziTencentComments.titleKey(work.title) !== titleKey) throw this.fail('work');
+            return work;
+        });
+    }
+    normalizeWork(row) {
+        const attrs = row && row.attributes;
+        const detail = row && row.querySelector('.comment-content-detail');
+        const href = detail && detail.attributes && detail.attributes.href;
+        const match = typeof href === 'string' && href.match(/^\/Community\/topic\/topic_id\/(\d{1,20})\/page\/1$/);
+        if (!attrs || !/^\d{1,20}$/.test(String(attrs['data-c'] || '')) || !match || match[1] !== String(attrs['data-c'])) throw this.fail('schema');
+        if (typeof detail.text !== 'string') throw this.fail('schema');
+        // HtmlDocument.text has already decoded entities/stripped tags; never parse it again as HTML.
+        const clean = value => typeof value === 'string' ? value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '').trim() : '';
+        const content = clean(detail.text);
+        if (!content || content.length > 20000) throw this.fail('schema');
+        const nickname = clean(row.querySelector('.comment-content-name')?.text);
+        const times = clean(row.querySelector('.comment-time')?.text);
+        const rawAvatar = row.querySelector('.userhead-b')?.attributes?.src;
+        const avatar = typeof rawAvatar === 'string' && /^https:\/\/[^/\s<>][^\s<>]*$/.test(rawAvatar) ? rawAvatar : null;
+        return { id: match[1], userName: nickname.slice(0, 200) || '腾讯动漫用户', avatar,
+            content: '[腾讯作品讨论 · 网站默认；非章节评论]\n' + content,
+            time: times ? times.slice(0, 100) : null,
+            replyCount: null, score: null, isLiked: null, voteStatus: null };
+    }
+    async workComments(ctx, comicId, page) {
+        const scope = JSON.stringify(['workPage', comicId, 'website-default']);
+        return this.cached(ctx, JSON.stringify([scope, page]), async () => {
+            const url = 'https://ac.qq.com/Community/topicList?targetId=' + comicId + '&page=' + page;
+            const headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36',
+                Accept: 'text/html', Referer: 'https://ac.qq.com/Comic/comicInfo/id/' + comicId };
+            const body = await this.get(ctx, url, headers);
+            if (body[0] !== '2') throw this.fail('gate');
+            let html = body.slice(1);
+            try { html = decodeURIComponent(html); } catch (_) { /* official web behavior: raw HTML on stray %. */ }
+            const doc = new HtmlDocument(html);
+            let comments;
+            try {
+                const total = doc.getElementById('totalNum')?.attributes?.value;
+                // totalNum is only a known response marker, NEVER a page count.
+                if (typeof total !== 'string' || !/^\d{1,12}$/.test(total)) throw this.fail('schema');
+                const rows = doc.querySelectorAll('.comment-list-content-wr');
+                if (!rows || rows.length > 200) throw this.fail('schema');
+                const unique = new Map();
+                for (const row of rows) { const comment = this.normalizeWork(row); if (!unique.has(comment.id)) unique.set(comment.id, comment); }
+                comments = Array.from(unique.values());
+            } finally { doc.dispose(); }
+            const prev = page > 1 ? this.getCache(JSON.stringify([scope, page - 1])) : null;
+            if (comments.length && prev && prev.comments.length && JSON.stringify(comments.map(x => x.id).sort()) === JSON.stringify(prev.comments.map(x => x.id).sort())) throw this.fail('repeated');
+            // First/second real pages verified. Unknown last page; empty page terminates host scrolling.
+            return { comments, maxPage: comments.length === 0 ? page : null };
+        });
     }
     async load(comicId, epId, page, replyTo) {
         const settings = this.settings(); // Disabled means no loadInfo and no Network.
@@ -2245,7 +2389,9 @@ class LiziTencentComments {
             if (!Number.isSafeInteger(n) || n < 0) throw this.fail('incomplete');
             config[key] = n;
         }
-        if (config.total > 40 || config.pageIndex < 1 || config.pageSize !== 10) throw this.fail('incomplete');
+        // A large literal is valid public metadata, not a parser failure.
+        // The bounded collector handles overflow only after validating the first-page shape.
+        if (config.pageIndex < 1 || config.pageSize !== 10) throw this.fail('incomplete');
         return config;
     }
     async search(ctx, title) {
@@ -2303,6 +2449,15 @@ class LiziTencentComments {
             } finally { doc.dispose(); }
             if (official) {
                 if (next || hasPages) throw this.fail('incomplete');
+                if (declared > 40) {
+                    // Observed-title policy: no global uniqueness claim for a fuzzy overflow.
+                    // Validate one exact observed title downstream; never choose a fuzzy first row.
+                    const observed = Array.from(rows.values());
+                    observed.searchEvidence = { declaredTotal: declared, observedRows: rows.size,
+                        searchComplete: false, scope: 'validated-first-page',
+                        exactCandidateIds: observed.filter(x => LiziTencentComments.titleKey(x.title) === title).map(x => x.id) };
+                    return observed;
+                }
                 if (page === pages) {
                     if (rows.size !== declared) throw this.fail('incomplete');
                     return Array.from(rows.values());
@@ -2327,9 +2482,16 @@ class LiziTencentComments {
             } else {
                 const candidates = await this.search(ctx, local.title);
                 const exact = candidates.filter(x => LiziTencentComments.titleKey(x.title) === titleKey);
-                // Same-name editions require explicit manual work-ID disambiguation; never pick first.
-                if (exact.length !== 1) throw this.fail('work');
+                // Multiple observed same-name editions require explicit disambiguation.
+                // An absent observed title is inconclusive, not proof that the work does not exist.
+                if (exact.length !== 1) {
+                    const error = this.fail(exact.length === 0 && candidates.searchEvidence ? 'incomplete' : 'work');
+                    if (candidates.searchEvidence) error.searchEvidence = candidates.searchEvidence;
+                    throw error;
+                }
                 remote = await this.remote(ctx, exact[0].id);
+                if (candidates.searchEvidence) remote = { ...remote, searchComplete: false,
+                    searchEvidence: candidates.searchEvidence };
             }
             if (LiziTencentComments.titleKey(remote.title) !== titleKey) throw this.fail('work');
             // A manual ID is explicit work confirmation, not chapter confirmation or index permission.
