@@ -11,7 +11,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.33.20-comments.2";
+    version = "2.33.20-comments.3";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/feat/lizimh-tencent-comments-20261013/lizimh.js";
 
@@ -1285,6 +1285,24 @@ class Lizimh extends ComicSource {
     }
 
     comic = {
+        chapterCommentCapabilities: (() => {
+            const source = this;
+            return { sorts: ['new', 'hot', 'wonderful'], defaultSort: 'new', canLoadReplies: true,
+                get enabled() { return new LiziTencentComments(source, TencentChapterCrypto).enabled(); } };
+        })(),
+        commentCapabilities: (() => {
+            const source = this;
+            return { sorts: [], defaultSort: 'new', canLoadReplies: false,
+                get enabled() { return new LiziTencentComments(source, TencentChapterCrypto).enabled(); } };
+        })(),
+        loadCommentsWithOptions: async (comicId, subId, page, replyTo, options) => {
+            if (!this._tencentChapterComments) this._tencentChapterComments = new LiziTencentComments(this, TencentChapterCrypto);
+            return this._tencentChapterComments.loadWorkWithOptions(comicId, subId, page, replyTo, options);
+        },
+        loadChapterCommentsWithOptions: async (comicId, epId, page, replyTo, options) => {
+            if (!this._tencentChapterComments) this._tencentChapterComments = new LiziTencentComments(this, TencentChapterCrypto);
+            return this._tencentChapterComments.loadWithOptions(comicId, epId, page, replyTo, options);
+        },
         // Real work discussions, separate from chapter comments. Shared provider/pool.
         loadComments: async (comicId, subId, page, replyTo) => {
             if (!this._tencentChapterComments) {
@@ -1986,6 +2004,7 @@ class LiziTencentComments {
         this.source = source;
         this.crypto = crypto;
         this.cache = new Map();
+        this.threads = new Map();
         this.flights = new Map();
         this.localFlights = new Map();
         this.active = 0;
@@ -1996,7 +2015,7 @@ class LiziTencentComments {
     }
     static messages = {
         disabled: '腾讯章节评论已停用', settings: '腾讯评论设置无效，请检查排序和作品绑定',
-        input: '章节评论参数无效', reply: '暂不支持独立回复加载', busy: '评论请求繁忙，请稍后重试',
+        input: '章节评论参数无效', reply: '母回复绑定无效，请重新加载该章节评论', busy: '评论请求繁忙，请稍后重试',
         timeout: '章节评论加载超时，请稍后重试', network: '腾讯评论网络请求失败，请稍后重试',
         http: '腾讯评论服务暂不可用，请稍后重试', decode: '腾讯评论响应无法解析',
         gate: '腾讯评论服务未返回已验证的成功响应', schema: '腾讯评论响应格式不受支持',
@@ -2019,11 +2038,11 @@ class LiziTencentComments {
     check(ctx) {
         if (ctx.expired || Date.now() >= ctx.end) { ctx.expired = true; throw this.fail(ctx.workOnly ? 'workTimeout' : 'timeout'); }
     }
-    settings(workOnly = false) {
+    settings(workOnly = false, explicitSort = null) {
         let enabled, sort, raw;
         try {
             enabled = this.source.loadSetting('tencentCommentsEnabled');
-            sort = workOnly ? 'website-default' : this.source.loadSetting('tencentCommentSort');
+            sort = workOnly ? 'website-default' : explicitSort != null ? explicitSort : this.source.loadSetting('tencentCommentSort');
             raw = this.source.loadSetting('tencentCommentBindings');
         } catch (_) { throw this.fail('settings'); }
         if (enabled === 'off' || enabled === false || enabled === 'false' || enabled === 'disabled' || enabled === '0' || enabled === 0) throw this.fail('disabled');
@@ -2037,6 +2056,39 @@ class LiziTencentComments {
             for (const k of Object.keys(bindings)) if (!/^\d{1,20}$/.test(k) || !/^\d{1,20}$/.test(String(bindings[k]))) throw this.fail('settings');
         }
         return { sort, bindings };
+    }
+    enabled() {
+        try { this.settings(true); return true; }
+        catch (e) { return e.message === LiziTencentComments.messages.disabled ? false : true; }
+    }
+    options(options, workOnly = false) {
+        if (options == null) return null;
+        if (typeof options !== 'object' || Array.isArray(options)) throw this.fail('settings');
+        const sort = options.sort;
+        if (sort == null || sort === '') return null;
+        if (workOnly || !['new', 'hot', 'wonderful'].includes(sort)) throw this.fail('settings');
+        return sort;
+    }
+    async loadWithOptions(comicId, epId, page, replyTo, options) {
+        // Explicitly disabled is not a network failure or title-matching failure. Zero GET.
+        if (!this.enabled()) return { comments: [], maxPage: 0, total: 0, available: false };
+        const sort = this.options(options);
+        return this.loadCore(comicId, epId, page, replyTo, sort);
+    }
+    async loadWorkWithOptions(comicId, subId, page, replyTo, options) {
+        if (!this.enabled()) return { comments: [], maxPage: 0, total: 0, available: false };
+        this.options(options, true); // No invented work sort.
+        return this.loadWork(comicId, subId, page, replyTo);
+    }
+    expose(result) {
+        return { comments: result.comments.map(x => {
+            const copy = Object.assign({}, x);
+            if (copy.replyPreview) copy.replyPreview = Object.assign({}, copy.replyPreview);
+            const comment = new Comment(copy);
+            // Old hosts ignore constructor additions; safe additive property, no prototype replacement.
+            if (copy.replyPreview) comment.replyPreview = copy.replyPreview;
+            return comment;
+        }), maxPage: result.maxPage, total: result.total == null ? null : result.total, available: true };
     }
     // Work discussion is separate from load()/chapter comments. subId is opaque host metadata.
     async loadWork(comicId, subId, page, replyTo) {
@@ -2077,7 +2129,7 @@ class LiziTencentComments {
             this.flights.set(key, promise);
         }
         const result = await promise;
-        return { comments: result.comments.map(x => new Comment(Object.assign({}, x))), maxPage: result.maxPage };
+        return this.expose(result);
     }
     async localWork(ctx, comicId) {
         return this.cached(ctx, JSON.stringify(['workLocal', comicId]), async () => {
@@ -2155,11 +2207,12 @@ class LiziTencentComments {
             let html = body.slice(1);
             try { html = decodeURIComponent(html); } catch (_) { /* official web behavior: raw HTML on stray %. */ }
             const doc = new HtmlDocument(html);
-            let comments;
+            let comments, totalCount = null;
             try {
                 const total = doc.getElementById('totalNum')?.attributes?.value;
                 // totalNum is only a known response marker, NEVER a page count.
                 if (typeof total !== 'string' || !/^\d{1,12}$/.test(total)) throw this.fail('schema');
+                totalCount = this.count(Number(total));
                 const rows = doc.querySelectorAll('.comment-list-content-wr');
                 if (!rows || rows.length > 200) throw this.fail('schema');
                 const unique = new Map();
@@ -2169,19 +2222,22 @@ class LiziTencentComments {
             const prev = page > 1 ? this.getCache(JSON.stringify([scope, page - 1])) : null;
             if (comments.length && prev && prev.comments.length && JSON.stringify(comments.map(x => x.id).sort()) === JSON.stringify(prev.comments.map(x => x.id).sort())) throw this.fail('repeated');
             // First/second real pages verified. Unknown last page; empty page terminates host scrolling.
-            return { comments, maxPage: comments.length === 0 ? page : null };
+            return { comments, maxPage: comments.length === 0 ? page : null, total: totalCount };
         });
     }
     async load(comicId, epId, page, replyTo) {
-        const settings = this.settings(); // Disabled means no loadInfo and no Network.
-        if (replyTo != null && replyTo !== '') throw this.fail('reply');
+        return this.loadCore(comicId, epId, page, replyTo, null);
+    }
+    async loadCore(comicId, epId, page, replyTo, explicitSort) {
+        const settings = this.settings(false, explicitSort); // Disabled means no loadInfo and no Network.
         comicId = String(comicId); epId = String(epId);
+        const thread = replyTo == null || replyTo === '' ? null : this.parseThread(replyTo, comicId, epId);
         if (!/^\d{1,20}$/.test(comicId) || !epId || epId.length > 80) throw this.fail('input');
         page = page == null ? 1 : Number(page);
         if (!Number.isSafeInteger(page) || page < 1) throw this.fail('input');
         if (page > 500) throw this.fail('limit');
         const bound = Object.prototype.hasOwnProperty.call(settings.bindings, comicId) ? String(settings.bindings[comicId]) : null;
-        const key = JSON.stringify(['load', comicId, epId, page, settings.sort, bound]);
+        const key = JSON.stringify(['load', comicId, epId, page, settings.sort, bound, thread]);
         let promise = this.flights.get(key);
         if (!promise) {
             if (this.flights.size >= 16) throw this.fail('busy');
@@ -2192,7 +2248,7 @@ class LiziTencentComments {
                 setTimeout(() => {
                     if (!done) { ctx.expired = true; done = true; reject(this.fail('timeout')); }
                 }, this.deadlineMs);
-                Promise.resolve().then(() => this.run(ctx, comicId, epId, page, settings.sort, bound)).then(
+                Promise.resolve().then(() => this.run(ctx, comicId, epId, page, settings.sort, bound, thread)).then(
                     value => { if (!done) { done = true; resolve(value); } },
                     error => { if (!done) { done = true; reject(error && error.liziCommentError ? error : this.fail('schema')); } }
                 ).then(() => { this.flights.delete(key); });
@@ -2201,7 +2257,7 @@ class LiziTencentComments {
         }
         const result = await promise;
         // Never expose cache objects to a mutable host UI.
-        return { comments: result.comments.map(x => new Comment(Object.assign({}, x))), maxPage: result.maxPage };
+        return this.expose(result);
     }
     async slot(ctx, fn) {
         this.check(ctx);
@@ -2507,19 +2563,115 @@ class LiziTencentComments {
     }
     normalize(row) {
         if (!row || typeof row !== 'object' || !/^\d{1,20}$/.test(String(row.topic_id || '')) || typeof row.content !== 'string') throw this.fail('schema');
-        const user = row.user || row.user_info || row.author || {};
-        const name = row.nickname || row.nick_name || user.nickname || user.nick_name || user.name;
-        const avatar = row.avatar || user.avatar || user.head_url || user.face;
-        let content = this.plain(row.content);
-        if (row.over_comment_info && typeof row.over_comment_info.content === 'string') {
-            const preview = this.plain(row.over_comment_info.content);
-            if (preview) content += '\n\n[回复预览（非完整回复）]\n' + preview;
+        // Observed live schema: nick_name, qq_head(https), date(string),
+        // good_count and comment_count(number). Do not guess user/avatar aliases.
+        let replyPreview = null;
+        const preview = row.over_comment_info;
+        if (preview && typeof preview === 'object' && typeof preview.content === 'string') {
+            const content = this.plain(preview.content);
+            if (content) replyPreview = {
+                id: /^\d{1,20}$/.test(String(preview.comment_id || '')) ? String(preview.comment_id) : null,
+                userName: typeof preview.nick_name === 'string' ? this.plain(preview.nick_name) || '腾讯动漫用户' : '腾讯动漫用户',
+                content, avatar: null, time: null
+            }; // Preview contains no observed avatar or date. Never invent from host_qq.
         }
-        const score = Number(row.good_count);
-        return { id: String(row.topic_id), userName: typeof name === 'string' ? this.plain(name) : '腾讯动漫用户',
-            avatar: typeof avatar === 'string' && /^https:\/\/[^\s<>]+$/.test(avatar) ? avatar : null,
-            content, time: typeof row.date === 'string' ? this.plain(row.date) : null,
-            score: Number.isSafeInteger(score) && score >= 0 ? score : null };
+        return { id: String(row.topic_id),
+            threadType: this.count(row.target_type),
+            userName: typeof row.nick_name === 'string' ? this.plain(row.nick_name) || '腾讯动漫用户' : '腾讯动漫用户',
+            avatar: this.avatar(row.qq_head), content: this.plain(row.content),
+            time: this.time(row.date), score: this.count(row.good_count),
+            replyCount: this.count(row.comment_count), replyPreview };
+    }
+    threadToken(localId, epId, remoteId, chapterId, topicId, type) {
+        if (type == null) return null; // No guessed target_type.
+        const scope = ['lizimh', String(localId), String(epId), String(remoteId), String(chapterId), String(topicId), type];
+        const token = 'tqc3:' + encodeURIComponent(JSON.stringify(scope));
+        this.threads.delete(token); this.threads.set(token, scope);
+        while (this.threads.size > 2048) this.threads.delete(this.threads.keys().next().value);
+        return token;
+    }
+    parseThread(token, localId, epId) {
+        if (typeof token !== 'string' || token.length > 1500 || !token.startsWith('tqc3:')) throw this.fail('reply');
+        const scope = this.threads.get(token);
+        if (!scope || scope[0] !== 'lizimh' || scope[1] !== localId || scope[2] !== epId) throw this.fail('reply');
+        return scope.slice(); // Only registered observed mothers; no arbitrary route injection.
+    }
+    safeStringCount(value) {
+        if (typeof value === 'string' && /^(?:0|[1-9]\d*)$/.test(value)) return this.count(Number(value));
+        return this.count(value);
+    }
+    normalizeReply(row) {
+        if (!row || typeof row !== 'object' || !/^\d{1,20}$/.test(String(row.comment_id || '')) || typeof row.content !== 'string') throw this.fail('schema');
+        let replyPreview = null;
+        if (Array.isArray(row.reply_list)) {
+            const nested = row.reply_list.find(x => x && typeof x.content === 'string');
+            if (nested) replyPreview = { id: null,
+                userName: typeof nested.from_nick === 'string' ? this.plain(nested.from_nick) || '腾讯动漫用户' : '腾讯动漫用户',
+                toUserName: typeof nested.to_nick === 'string' ? this.plain(nested.to_nick) || null : null,
+                content: this.plain(nested.content), avatar: null, time: null };
+        }
+        return { id: null, userName: typeof row.nick_name === 'string' ? this.plain(row.nick_name) || '腾讯动漫用户' : '腾讯动漫用户',
+            avatar: this.avatar(row.qq_head), content: this.plain(row.content), time: this.time(row.date),
+            score: this.safeStringCount(row.good_count), replyCount: this.count(row.reply_count), replyPreview };
+    }
+    async threadComments(ctx, thread, page) {
+        const scope = JSON.stringify(['threadPage', thread]);
+        return this.cached(ctx, JSON.stringify([scope, page]), async () => {
+            const [source, localId, epId, comicId, chapterId, topicId, type] = thread;
+            const path = '/13.1.2/Comment/getTopicCommentList/type/1/topic_id/' + topicId + '/page/' + page + '/listcnt/10/comic_id/' + comicId +
+                (type === 11 ? '' : '/target_type/' + type);
+            const obj = await this.api(ctx, path);
+            const data = obj.data, rows = data && data.list;
+            if (!Array.isArray(rows) || rows.length > 200) throw this.fail('schema');
+            this.validateBindings(data, comicId, chapterId);
+            // Optional echoed mother identity must never disagree with the requested mother.
+            for (const row of rows) if (row && row.topic_id != null && String(row.topic_id) !== topicId) throw this.fail('schema');
+            if (data.topic_id != null && String(data.topic_id) !== topicId) throw this.fail('schema');
+            const unique = new Map();
+            for (const row of rows) {
+                const comment = this.normalizeReply(row);
+                if (!unique.has(String(row.comment_id))) unique.set(String(row.comment_id), comment);
+            }
+            const ids = Array.from(unique.keys());
+            const prev = page > 1 ? this.getCache(JSON.stringify([scope, page - 1])) : null;
+            if (ids.length && prev && prev.ids.length && JSON.stringify(ids.slice().sort()) === JSON.stringify(prev.ids.slice().sort())) throw this.fail('repeated');
+            // Native CFString 0x1040a03b8=end_of_list; callback cmp 2 then setIsEnd:1.
+            return { comments: Array.from(unique.values()), ids, total: this.count(data.comment_count),
+                maxPage: rows.length === 0 || data.end_of_list === 2 ? page : null };
+        });
+    }
+    async api(ctx, path) {
+        const host = 'iphone.ac.qq.com', time = String(Date.now());
+        const headers = { GUESTID: '0', GUESTTOKEN: '0', QIMEI: '0', QIMEI36: '0', FAKEDUIN: '0', OPENID: '0', ACCESSTOKEN: '0', QQ: '0', LOGINTYPE: '3', VERSION: '13.1.2', BUILDNO: '0924253', HOST: host,
+            Accept: 'application/json', 'Accept-Encoding': 'identity', 'User-Agent': '', LOCALTIME: time };
+        let metadata;
+        try { metadata = this.crypto.metadata(); } catch (_) { throw this.fail('decode'); }
+        if (!metadata || typeof metadata !== 'object') throw this.fail('decode');
+        for (const key of ['DEVICETYPE', 'MODEL', 'NETWORK']) {
+            const value = metadata[key];
+            if (typeof value !== 'string' || !value || value.length > 128 || !/^[\x20-\x7e]+$/.test(value)) throw this.fail('decode');
+            headers[key] = value;
+        }
+        try { headers.SC = this.crypto.sign(path, host, '0', '0', time); } catch (_) { throw this.fail('decode'); }
+        const body = await this.get(ctx, 'https://' + host + path, headers, 1048576);
+        let obj;
+        try {
+            if (typeof this.crypto.decodeAsync !== 'function') throw this.fail('decode');
+            obj = await this.crypto.decodeAsync(body.trim());
+        } catch (_) { throw this.fail('decode'); }
+        this.check(ctx);
+        if (!obj || obj.error_code !== 2 || (Object.prototype.hasOwnProperty.call(obj, 'ret') && obj.ret !== 2) || Object.prototype.hasOwnProperty.call(obj, 'code') || Object.prototype.hasOwnProperty.call(obj, 'status')) throw this.fail('gate');
+        return obj;
+    }
+    count(value) {
+        return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+    }
+    time(value) {
+        // date is observed string only. Preserve relative text; blank means unknown.
+        return typeof value === 'string' ? this.plain(value).slice(0, 100) || null : null;
+    }
+    avatar(value) {
+        return typeof value === 'string' && /^https:\/\/[^\s<>]+$/.test(value) ? value : null;
     }
     validateBindings(obj, comicId, chapterId) {
         let count = 0;
@@ -2577,7 +2729,7 @@ class LiziTencentComments {
             return { comments: Array.from(unique.values()), maxPage: sort === 'wonderful' ? 1 : rows.length === 0 ? page : null };
         });
     }
-    async run(ctx, comicId, epId, page, sort, bound) {
+    async run(ctx, comicId, epId, page, sort, bound, thread = null) {
         const local = await this.local(ctx, comicId);
         // epId is the public source's ORDER KEY. No raw chapter ID, ordinal or index fallback.
         const row = local.chapters.find(x => x.id === epId);
@@ -2586,7 +2738,18 @@ class LiziTencentComments {
         const target = LiziTencentComments.matchChapter(row, local.chapters, remote.chapters);
         if (!target) throw this.fail('chapter');
         this.check(ctx);
-        return this.comments(ctx, remote.id, target.id, page, sort);
+        if (thread) {
+            if (thread[3] !== remote.id || thread[4] !== target.id) throw this.fail('reply');
+            return this.threadComments(ctx, thread, page);
+        }
+        const result = await this.comments(ctx, remote.id, target.id, page, sort);
+        // Bind at the local boundary, not inside a remote-page cache shared by local works.
+        return Object.assign({}, result, { comments: result.comments.map(x => {
+            const copy = Object.assign({}, x);
+            copy.id = this.threadToken(comicId, epId, remote.id, target.id, x.id, x.threadType);
+            delete copy.threadType;
+            return copy;
+        }) });
     }
 }
 
