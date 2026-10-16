@@ -11,7 +11,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.33.21";
+    version = "2.33.22";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -70,7 +70,7 @@ class Lizimh extends ComicSource {
     static fallbackClasses = [["国漫",1],["日漫",2],["韩漫",3],["美漫",4],["精选推荐",5]];
 
     settings = {
-        commentProvider: {title: "默认评论接口", type: "select", options: [{value:"tencent",text:"腾讯"},{value:"qingman",text:"青漫"}], default:"tencent"},
+        commentProviderV2: {title: "评论接口（新版路由）", type: "select", options: [{value:"auto",text:"自动：腾讯优先，无评论区时青漫"},{value:"tencent",text:"始终腾讯"},{value:"qingman",text:"始终青漫"}], default:"auto", description:"升级后默认自动；旧版接口偏好不继承。需要固定青漫/腾讯请在此重新选择。不会修改旧设置或账号。"},
         qingmanCommentsEnabled: {title:"青漫只读评论",type:"select",options:[{value:"on",text:"开启"},{value:"off",text:"关闭"}],default:"on"},
         manualqingmanbinding: {title:"青漫显式作品/章节绑定 JSON",type:"input",default:"{}",description:'格式 {"栗子作品ID":{"comicId":"青漫作品ID","title":"完整书名","chapters":{"栗子章节ID":{"chapterId":"青漫章节ID","title":"完整章节名"}}}}；可选消歧；未绑定自动搜索完整书名并核对真实目录，不按章节序号猜测。'},
         tencentCommentsEnabled: {
@@ -1288,7 +1288,7 @@ class Lizimh extends ComicSource {
     }
 
     comic = {
-        commentProviderSetting: 'commentProvider',
+        commentProviderSetting: 'commentProviderV2',
         chapterCommentCapabilities: (() => {
             const s=this, caps={};
             for (const k of ['sorts','defaultSort','canLoadReplies','canSend','canLike','enabled']) Object.defineProperty(caps,k,{enumerable:true,get(){if (!s._commentProviders) s._commentProviders=new LiziCommentProviders(s); return s._commentProviders.capabilities(false)[k];}});
@@ -2239,7 +2239,7 @@ class LiziTencentComments {
             const candidates = await this.search(ctx, local.title);
             const exact = candidates.filter(x => LiziTencentComments.titleKey(x.title) === titleKey);
             if (exact.length !== 1) {
-                const incomplete = !!candidates.searchEvidence;
+                const incomplete = exact.length === 0 && !!candidates.searchEvidence;
                 const error = this.fail(incomplete ? 'incomplete' : 'work');
                 error.matchReason = incomplete ? 'match-unresolved' : exact.length === 0 ? 'no-match' : 'nonunique';
                 error.searchEvidence = candidates.searchEvidence || { searchComplete: true, scope: 'validated-search', observedRows: candidates.length };
@@ -2638,8 +2638,15 @@ class LiziTencentComments {
                     return observed;
                 }
                 if (page === pages) {
-                    if (rows.size !== declared) throw this.fail('incomplete');
-                    return Array.from(rows.values());
+                    if (rows.size > declared) throw this.fail('incomplete');
+                    const observed = Array.from(rows.values());
+                    // Search metadata may overstate the number of returned rows. The page
+                    // budget is exhausted and every observed row has passed shape/ID checks;
+                    // retain an explicit incomplete marker so zero-match stays fail-closed.
+                    if (rows.size < declared) observed.searchEvidence = { declaredTotal: declared, observedRows: rows.size,
+                        searchComplete: false, scope: 'validated-short-final-page',
+                        exactCandidateIds: observed.filter(x => LiziTencentComments.titleKey(x.title) === title).map(x => x.id) };
+                    return observed;
                 }
                 // Short fragments never prove exhaustion; request every declared page.
                 url = base + '&page=' + (page + 1) + '&pageSize=10&style=items';
@@ -3038,41 +3045,158 @@ class QingmanProvider {
 }
 
 class LiziCommentProviders {
-    constructor(source) { this.source=source; this.revision=0; this.snapshot=null; this.tencent=null; this.qingman=null; }
-    selected() { const p=this.source.loadSetting('commentProvider'); if (p==null || p==='') return 'tencent'; if (!['tencent','qingman'].includes(p)) throw new Error('评论接口设置无效'); return p; }
+    constructor(source) {
+        this.source=source; this.revision=0; this.snapshot=null; this.tencent=null; this.qingman=null;
+        this.scopes=new Map(); this.replies=new Map(); this.maxScopes=64; this.maxReplies=1024; this.ttl=120000;
+    }
+    selected() {
+        // A new preference namespace is the one-time migration. Never write settings during a request.
+        const p=this.source.loadSetting('commentProviderV2');
+        if (p==null || p==='') return 'auto';
+        if (!['auto','tencent','qingman'].includes(p)) throw new Error('评论接口设置无效');
+        return p;
+    }
     token() {
-        const p=this.selected();
         const keys=['tencentCommentsEnabled','tencentCommentSort','tencentCommentBindings','qingmanCommentsEnabled','manualqingmanbinding'];
-        const state=JSON.stringify([p,keys.map(k=>this.source.loadSetting(k))]);
-        if (state!==this.snapshot) {this.snapshot=state;this.revision++;this.tencent=null;this.qingman=null;}
+        const state=JSON.stringify([this.selected(),keys.map(k=>this.source.loadSetting(k))]);
+        if (state!==this.snapshot) {
+            this.snapshot=state; this.revision++; this.tencent=null; this.qingman=null;
+            this.scopes.clear(); this.replies.clear();
+        }
         return this.revision;
     }
-    capabilities(workOnly) {
-        this.token();
-        const q=this.selected()==='qingman';
-        return {sorts:workOnly?[]:q?['new','hot']:['new','hot','wonderful'], defaultSort:'new', canLoadReplies:!q, canSend:false, canLike:false, enabled:q?new QingmanProvider(this.source).enabled():new LiziTencentComments(this.source,TencentChapterCrypto).enabled()};
+    failure(code) { const e=new Error('评论路由已过期或参数无效，请重新加载首屏 ['+code+']'); e.code=code; return e; }
+    check(revision) { if (this.token()!==revision) throw this.failure('provider-changed'); }
+    put(map,key,value,max) {
+        map.delete(key); map.set(key,value);
+        while (map.size>max) map.delete(map.keys().next().value);
     }
-    async load(workOnly, comicId, epId, page, replyTo, options) {
-        const revision=this.token(), provider=this.selected();
-        let result;
-        try {
-            if (provider==='qingman') {
-                if (!this.qingman) this.qingman=new QingmanProvider(this.source);
-                result=await this.qingman.load(comicId,epId,page,replyTo,options,workOnly);
-            } else {
-                if (!this.tencent) this.tencent=new LiziTencentComments(this.source,TencentChapterCrypto);
-                result=await (workOnly ? this.tencent.loadWorkWithOptions(comicId,epId,page,replyTo,options) : this.tencent.loadWithOptions(comicId,epId,page,replyTo,options));
-            }
-        } catch(e) {
-            if (this.token() !== revision) {
-                if (provider === 'qingman') throw QingmanProvider.failure('provider-changed');
-                return QingmanProvider.unavailable('provider-changed');
-            }
-            throw e; // Preserve original bridge/profile/network errors unchanged.
+    capabilities(workOnly) {
+        this.token(); const q=this.selected()==='qingman';
+        return {sorts:workOnly?[]:q?['new','hot']:['new','hot','wonderful'], defaultSort:'new', canLoadReplies:!q, canSend:false, canLike:false,
+            enabled:q?new QingmanProvider(this.source).enabled():new LiziTencentComments(this.source,TencentChapterCrypto).enabled()};
+    }
+    async invoke(provider,workOnly,comicId,epId,page,replyTo,options) {
+        if (provider==='qingman') {
+            if (!this.qingman) this.qingman=new QingmanProvider(this.source);
+            return this.qingman.load(comicId,epId,page,replyTo,options,workOnly);
         }
-        if (this.token() === revision) return result;
-        if (provider === 'qingman') throw QingmanProvider.failure('provider-changed');
-        return QingmanProvider.unavailable('provider-changed');
+        if (!this.tencent) this.tencent=new LiziTencentComments(this.source,TencentChapterCrypto);
+        return workOnly ? this.tencent.loadWorkWithOptions(comicId,epId,page,replyTo,options) : this.tencent.loadWithOptions(comicId,epId,page,replyTo,options);
+    }
+    noMatch(r) {
+        return r && r.available===false && r.reason==='no-match' && r.diagnostic &&
+            r.diagnostic.code==='work' && r.diagnostic.searchComplete===true;
+    }
+    chapterUnmatched(r) {
+        return r && r.available===false && r.reason==='match-unresolved' && r.diagnostic &&
+            r.diagnostic.code==='chapter';
+    }
+    empty(r) { return !!r && r.available===true && Array.isArray(r.comments) && r.comments.length===0; }
+    async fallback(r,workOnly,comicId,epId,options,revision) {
+        if (this.noMatch(r)) return 'no-match';
+        if (!workOnly && this.chapterUnmatched(r)) return 'chapter-unmatched';
+        if (!this.empty(r)) return null;
+        if (workOnly) return r.total===0 ? 'confirmed-empty' : null;
+        // A zero new page says nothing about hot/wonderful. Verify every supported first-page collection.
+        const selected=options && options.sort || this.source.loadSetting('tencentCommentSort') || 'new';
+        for (const sort of ['new','hot','wonderful']) {
+            if (sort===selected) continue;
+            const probe=await this.invoke('tencent',false,comicId,epId,1,null,{sort});
+            this.check(revision);
+            if (!this.empty(probe)) return null;
+        }
+        return 'confirmed-empty';
+    }
+    decorate(result,provider,base,revision,reason) {
+        if (!result || !Array.isArray(result.comments)) throw this.failure('schema');
+        const previous=result.commentContext || {};
+        const commentContext={provider, comicFavoriteCount:provider==='tencent' && previous.comicFavoriteCount!=null?previous.comicFavoriteCount:null,
+            chapterLikeCount:provider==='tencent' && previous.chapterLikeCount!=null?previous.chapterLikeCount:null};
+        for (const comment of result.comments) {
+            if (provider==='tencent' && typeof comment.id==='string' && /^(?:tqw8:|tqc3:)/.test(comment.id))
+                this.put(this.replies,comment.id,{provider,base,revision},this.maxReplies);
+        }
+        return Object.assign({},result,{provider,effectiveProvider:provider,commentContext,
+            routingContext:{provider,mode:this.selected(),revision,reason:reason || null,scope:base}});
+    }
+    async load(workOnly,comicId,epId,page,replyTo,options) {
+        const revision=this.token();
+        try { return await this.loadScoped(workOnly,comicId,epId,page,replyTo,options); }
+        catch(e) { this.check(revision); throw e; }
+    }
+    async loadScoped(workOnly,comicId,epId,page,replyTo,options) {
+        const revision=this.token(), mode=this.selected();
+        comicId=String(comicId); epId=epId==null?'':String(epId); page=page==null?1:Number(page);
+        if (!Number.isSafeInteger(page) || page<1 || page>500) throw this.failure('page');
+        if (options!=null && (typeof options!=='object' || Array.isArray(options))) throw this.failure('options');
+        const base=JSON.stringify([workOnly?'work':'chapter',comicId,workOnly?'':epId]);
+        const sort=workOnly?'website-default':options && options.sort || (mode==='qingman'?'new':this.source.loadSetting('tencentCommentSort')) || 'new';
+        if (!workOnly) options=Object.assign({},options || {},{sort});
+        const key=JSON.stringify([base,sort]);
+        const guard=p=>{ if (options && options.provider!=null && options.provider!==p) throw this.failure('stale-provider'); };
+        if (replyTo!=null && replyTo!=='') {
+            const reply=this.replies.get(replyTo);
+            const active=this.scopes.get(key);
+            if (!reply || reply.base!==base || reply.revision!==revision || reply.provider!=='tencent' || mode==='qingman' || !active || active.provider!==reply.provider) throw this.failure('reply-provider');
+            guard(reply.provider);
+            const r=await this.invoke(reply.provider,workOnly,comicId,epId,page,replyTo,options);
+            this.check(revision); return this.decorate(r,reply.provider,base,revision,null);
+        }
+        let entry=this.scopes.get(key);
+        if (entry && Date.now()-entry.time>this.ttl) {
+            this.scopes.delete(key);
+            entry=null;
+        }
+        let resolvedOnThisCall=false;
+        if (!entry) {
+            // Resolve the provider again after eviction; the decision remains sticky for this scope.
+            entry={provider:mode==='auto'?'tencent':mode,time:Date.now(),reason:null,pending:null,sort};
+            this.put(this.scopes,key,entry,this.maxScopes);
+            if (mode==='auto') {
+                resolvedOnThisCall=true;
+                entry.pending=(async()=>{
+                    let r=await this.invoke('tencent',workOnly,comicId,epId,1,null,options);
+                    this.check(revision);
+                    const reason=await this.fallback(r,workOnly,comicId,epId,options,revision);
+                    this.check(revision);
+                    if (reason) {
+                        const fallbackOptions=!workOnly && sort==='wonderful'
+                            ? Object.assign({},options,{sort:'new'}) : options;
+                        try {
+                            const qingman=await this.invoke('qingman',workOnly,comicId,epId,1,null,fallbackOptions);
+                            this.check(revision);
+                            r=qingman; entry.provider='qingman'; entry.reason=reason;
+                            entry.sort=fallbackOptions && fallbackOptions.sort || sort;
+                        } catch(e) {
+                            if (e && e.code==='provider-changed') throw e;
+                            this.check(revision);
+                            entry.provider='tencent';
+                            entry.reason=reason+':fallback-failed:'+((e && e.code) || 'error');
+                        }
+                    }
+                    entry.first=r; entry.time=Date.now();
+                })();
+                try { await entry.pending; }
+                catch(e) { if (this.scopes.get(key)===entry) this.scopes.delete(key); this.check(revision); throw e; }
+                finally { entry.pending=null; }
+                guard(entry.provider);
+                if (page===1) return this.decorate(entry.first,entry.provider,base,revision,entry.reason);
+            }
+        }
+        if (entry.pending) await entry.pending;
+        this.check(revision); guard(entry.provider);
+        // The first request decides the route; a requested later page follows it.
+        const result=resolvedOnThisCall && entry.first && page>1
+            ? await this.invoke(entry.provider,workOnly,comicId,epId,page,null,
+                entry.provider==='qingman' && !workOnly && entry.sort==='new'
+                    ? Object.assign({},options,{sort:'new'}) : options)
+            : resolvedOnThisCall && page===1 ? entry.first
+            : await this.invoke(entry.provider,workOnly,comicId,epId,page,null,
+                entry.provider==='qingman' && !workOnly && entry.sort==='new'
+                    ? Object.assign({},options,{sort:'new'}) : options);
+        this.check(revision);
+        return this.decorate(result,entry.provider,base,revision,entry.reason);
     }
 }
 
