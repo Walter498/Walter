@@ -11,7 +11,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.33.22";
+    version = "2.33.23";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -398,8 +398,45 @@ class Lizimh extends ComicSource {
         return Lizimh.lines[i].url;
     }
 
+    // Official JWT lists contain generator markers. Keep their order but use
+    // the configured plain-image CDN; the marker-specific host serves binary data.
+    // Persist paths, not a selected CDN URL. Also repair pre-fix absolute caches.
+    officialImagePath(value) {
+        const text = String(value || "");
+        const marker = text.match(/\$jp\$(?:cf)?/);
+        if (marker) return text.slice(marker.index + marker[0].length);
+        for (const line of Lizimh.lines) {
+            if (line.proxy && line.src && text.startsWith(line.url)) {
+                try {
+                    const src = decodeURIComponent(text.slice(line.url.length));
+                    if (src.startsWith(line.src + "/")) return src.slice(line.src.length);
+                } catch (_) {}
+            }
+        }
+        const m = text.match(/^https?:\/\/([^/]+)(\/.*)$/);
+        if (m) {
+            const host = m[1].toLowerCase();
+            if (host === "pic.lizimh.net" || host === "img2.mechat.fun") return m[2];
+            const known = ["cdn.lzimg.xyz", "i.lzimg.xyz", "cf-1.imgio.club", "media.imgo.buzz", "img.mechat.fun"];
+            if (known.indexOf(host) >= 0 || Lizimh.lines.some(x => !x.proxy && text.startsWith(x.url + "/"))) return m[2];
+        }
+        return text;
+    }
+
+    officialImageUrls(values) {
+        const line = this.currentLine();
+        return values.map(value => {
+            const path = this.officialImagePath(value);
+            const url = this.abs(path);
+            this._imgLine[url] = line;
+            this._imgPath[url] = path;
+            return url;
+        });
+    }
+
     // 由相對路徑構造絕對 URL (供探測與換線使用)
     lineAbs(path, idx) {
+        path = this.officialImagePath(path);
         let i = (idx === undefined || idx === null) ? this.currentLine() : idx;
         if (i < 0 || i >= Lizimh.lines.length) i = 0;
         let line = Lizimh.lines[i];
@@ -455,6 +492,7 @@ class Lizimh extends ComicSource {
 
     abs(path) {
         if (!path) return "";
+        path = this.officialImagePath(path);
         if (path.startsWith("http")) return path;
         let line = Lizimh.lines[this.currentLine()] || Lizimh.lines[0];
         if (line.proxy && line.src) {
@@ -534,7 +572,7 @@ class Lizimh extends ComicSource {
         for (let k = 1; k <= order.length; k++) {
             let nxt = order[(pos + k) % order.length];
             if (nxt === cur) continue;
-            let nu = Lizimh.lines[nxt].url + path;
+            let nu = this.lineAbs(path, nxt);
             this._imgLine[nu] = nxt;
             this._imgPath[nu] = path;
             return nu;
@@ -906,7 +944,7 @@ class Lizimh extends ComicSource {
             if (Date.now() < until) return null;
         } catch (e) {}
         if (this._officialCache[String(chapterId)]) {
-            return this._officialCache[String(chapterId)].slice();
+            return this.officialImageUrls(this._officialCache[String(chapterId)]);
         }
         // 持久化快取：官方順序不會變，抓過一次就存起來
         //（這個接口會消耗帳號的閱讀額度，別重複抓）
@@ -915,8 +953,10 @@ class Lizimh extends ComicSource {
             if (saved) {
                 let arr = JSON.parse(saved);
                 if (arr && arr.length) {
+                    arr = arr.map(x => this.officialImagePath(x));
                     this._officialCache[String(chapterId)] = arr;
-                    return arr.slice();
+                    try { this.saveData(key, JSON.stringify(arr)); } catch (_) {}
+                    return this.officialImageUrls(arr);
                 }
             }
         } catch (e) {}
@@ -942,10 +982,10 @@ class Lizimh extends ComicSource {
             let data = JSON.parse(res.body);
             let pics = (data && data.data && data.data.pics) || [];
             if (!pics.length) return null;
-            let out = pics.map((x) => this.abs(String(x)));
+            let out = pics.map((x) => this.officialImagePath(x));
             this._officialCache[String(chapterId)] = out;
             try { this.saveData(key, JSON.stringify(out)); } catch (e) {}
-            return out.slice();
+            return this.officialImageUrls(out);
         } catch (e) {
             return null;
         }
