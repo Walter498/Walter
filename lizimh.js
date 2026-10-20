@@ -11,7 +11,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.33.23";
+    version = "2.33.24";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -1350,11 +1350,17 @@ class Lizimh extends ComicSource {
         loadComments: async (comicId,subId,page,replyTo) => this.comic.loadCommentsWithOptions(comicId,subId,page,replyTo,null),
         loadChapterComments: async (comicId,epId,page,replyTo) => this.comic.loadChapterCommentsWithOptions(comicId,epId,page,replyTo,null),
 
+        loadChapterMetadata: async (comicId, chapterIds) => {
+            if (!this._chapterMetadataProvider) this._chapterMetadataProvider = new LiziChapterMetadata(this);
+            return this._chapterMetadataProvider.load(comicId, chapterIds);
+        },
+
         loadInfo: async (id) => {
             let data = await Lizimh.getJson(`/app/api/v2/detail/${id}`);
             let chapters = {};
             let covers = {};
             let chapterCovers = {};
+            let chapterMetadata = {};
             // v2.33.4 關鍵修正：章節 key 必須是「章節序號」，不能是章節 id。
             // ECMAScript 規定物件 key 只要是整數字串，列舉時一律按【數值升序】，
             // 插入順序完全無效 —— 用章節 id 當 key 時，後期補上/重傳的章節
@@ -1387,6 +1393,10 @@ class Lizimh extends ComicSource {
                 epMap[key] = chId;
                 coverById[chId] = ch.cover || "";
                 chapters[key] = ch.name || `第${o}话`;
+                // Lizi chapter creation/ingestion date, not Tencent publication date.
+                if (typeof ch.created_at === "string" && ch.created_at) {
+                    chapterMetadata[key] = { updateTime: ch.created_at, dateSource: "lizi" };
+                }
                 if (ch.cover) {
                     covers[key] = ch.cover;
                     lastCover = ch.cover;
@@ -1413,6 +1423,7 @@ class Lizimh extends ComicSource {
                 tags: tags,
                 chapters: chapters,
                 chapterCovers: chapterCovers,
+                chapterMetadata: chapterMetadata,
                 stars: data.score ? Number(data.score) : null,
                 updateTime: lastIso ? Lizimh.fmtDate(lastIso) : null,
             });
@@ -1636,6 +1647,42 @@ class TencentChapterCrypto {
   // UTF-8 chunks end at code-point boundaries, with controls removed per chunk.
   for(let p=0;p<bytes.length;) {
    let end=Math.min(p+64,bytes.length);
+   while(end<bytes.length&&(bytes[end]&0xc0)===0x80) end++;
+   pieces.push(utf8(bytes.subarray(p,end)));p=end;
+   await new Promise(resolve=>setTimeout(resolve,0));
+  }
+  try {return JSON.parse(pieces.join(''));} catch(_) { fail('json'); }
+ }
+ // Independent bounded catalog path: larger payload, cooperative chunks.
+ static async decodeCatalogAsync(wire) {
+  if(typeof wire!=='string') fail('base64');
+  if(wire.length>2097152) fail('size');
+  const wireParts=[];
+  for(let p=0;p<wire.length;p+=4096) {
+   wireParts.push(wire.slice(p,p+4096).replace(/[\x09-\x0d\x20]/g,''));
+   await new Promise(resolve=>setTimeout(resolve,0));
+  }
+  wire=wireParts.join('');
+  if(!wire.length||wire.length%4) fail('base64');
+  const parts=[];let length=0;
+  for(let p=0;p<wire.length;p+=4096) {
+   const end=Math.min(p+4096,wire.length),part=wire.slice(p,end);
+   if(end<wire.length&&part.indexOf('=')!==-1) fail('base64');
+   const bytes=base64(part);parts.push(bytes);length+=bytes.length;
+   await new Promise(resolve=>setTimeout(resolve,0));
+  }
+  if(length>1572864) fail('size');
+  const ct=new Uint8Array(length);let offset=0;for(const part of parts){ct.set(part,offset);offset+=part.length;}
+  const out=new Uint8Array(ct.length);
+  // Eight blocks per turn; bounded work without thousands of per-block host timers.
+  for(let p=0;p<ct.length;p+=512) {
+   decryptRange(ct,out,p,Math.min(p+512,ct.length));
+   await new Promise(resolve=>setTimeout(resolve,0));
+  }
+  const bytes=unpad(out),pieces=[];
+  // UTF-8 chunks end at code-point boundaries, with controls removed per chunk.
+  for(let p=0;p<bytes.length;) {
+   let end=Math.min(p+2048,bytes.length);
    while(end<bytes.length&&(bytes[end]&0xc0)===0x80) end++;
    pieces.push(utf8(bytes.subarray(p,end)));p=end;
    await new Promise(resolve=>setTimeout(resolve,0));
@@ -2817,7 +2864,7 @@ class LiziTencentComments {
                 maxPage: rows.length === 0 || data.end_of_list === 2 ? page : null };
         });
     }
-    async api(ctx, path) {
+    async api(ctx, path, chapterCatalog = false) {
         const host = 'iphone.ac.qq.com', time = String(Date.now());
         const headers = { GUESTID: '0', GUESTTOKEN: '0', QIMEI: '0', QIMEI36: '0', FAKEDUIN: '0', OPENID: '0', ACCESSTOKEN: '0', QQ: '0', LOGINTYPE: '3', VERSION: '13.1.2', BUILDNO: '0924253', HOST: host,
             Accept: 'application/json', 'Accept-Encoding': 'identity', 'User-Agent': '', LOCALTIME: time };
@@ -2830,11 +2877,12 @@ class LiziTencentComments {
             headers[key] = value;
         }
         try { headers.SC = this.crypto.sign(path, host, '0', '0', time); } catch (_) { throw this.fail('decode'); }
-        const body = await this.get(ctx, 'https://' + host + path, headers, 1048576);
+        if (chapterCatalog) { headers['Cache-Control'] = 'no-cache, no-store'; headers.Pragma = 'no-cache'; }
+        const body = await this.get(ctx, 'https://' + host + path, headers, chapterCatalog ? 2097152 : 1048576);
         let obj;
         try {
             if (typeof this.crypto.decodeAsync !== 'function') throw this.fail('decode');
-            obj = await this.crypto.decodeAsync(body.trim());
+            obj = chapterCatalog ? await this.crypto.decodeCatalogAsync(body.trim()) : await this.crypto.decodeAsync(body.trim());
         } catch (_) { throw this.fail('decode'); }
         this.check(ctx);
         if (!obj || obj.error_code !== 2 || (Object.prototype.hasOwnProperty.call(obj, 'ret') && obj.ret !== 2) || Object.prototype.hasOwnProperty.call(obj, 'code') || Object.prototype.hasOwnProperty.call(obj, 'status')) throw this.fail('gate');
@@ -3240,3 +3288,135 @@ class LiziCommentProviders {
     }
 }
 
+
+/* Read-only visible chapter facts: local dates, Tencent chapter_good_num.
+ * Uses an independent provider so comment errors/settings never block this feed. */
+class LiziChapterMetadata {
+    constructor(source) {
+        this.source = source;
+        this.provider = new LiziTencentComments(source, TencentChapterCrypto);
+        this.flights = new Map();
+    }
+    static title(value) {
+        let title = LiziTencentComments.titleKey(String(value || ''));
+        // Bare numbered source titles (053有一事相求) and 腾讯 chapter titles.
+        const m = title.match(/^(\d{1,6})\s*([^\d\s:：.．/、~～—–-].*)$/);
+        if (m && !/^[话話章回]/.test(m[2])) title = '第' + Number(m[1]) + '话 ' + m[2];
+        return title;
+    }
+    // Parse every title once (identity, subtitle, trimmed text), then match by
+    // lookup. Pure index over the same rows: no identity rule is relaxed.
+    static prepared(rows) {
+        const parses = new Map(), byIdentity = new Map(), byText = new Map();
+        const parse = (title) => {
+            const key = String(title == null ? '' : title);
+            if (parses.has(key)) return parses.get(key);
+            const value = LiziTencentComments.chapter(key);
+            parses.set(key, value);
+            return value;
+        };
+        for (const row of rows) {
+            const a = parse(row.title);
+            if (a) {
+                const list = byIdentity.get(a.identity);
+                if (list) list.push(row); else byIdentity.set(a.identity, [row]);
+            }
+            const text = LiziTencentComments.text(row.title);
+            if (text) {
+                const list = byText.get(text);
+                if (list) list.push(row); else byText.set(text, [row]);
+            }
+        }
+        return { parse, byIdentity, byText };
+    }
+    static match(row, local, remote, index) {
+        const localIndex = (index && index.local) || this.prepared(local);
+        const remoteIndex = (index && index.remote) || this.prepared(remote);
+        const a = localIndex.parse(row.title);
+        if (a) {
+            const locals = localIndex.byIdentity.get(a.identity) || [];
+            const targets = remoteIndex.byIdentity.get(a.identity) || [];
+            if (locals.length !== 1 || targets.length !== 1) return null;
+            const b = remoteIndex.parse(targets[0].title);
+            // A missing subtitle is allowed, conflicting nonempty subtitles are not.
+            if (a.subtitle && b.subtitle && a.subtitle !== b.subtitle) return null;
+            return targets[0];
+        }
+        const title = LiziTencentComments.text(row.title);
+        if (/第?[0-9零一二三四五六七八九十百]+[话話章回]/.test(title) && /上下|[上中下]篇|(?:^|[\s:：()（）-])[上中下](?:$|[\s)）])/.test(title)) return null;
+        // Exact unnumbered titles are anchors too; no stripping 番外/卷/上下篇.
+        if (!title || /^(?:正文|章节|章節|更新|通知|无标题|無標題|未命名|待定|暂无标题|暫無標題|暂无|暫無|未定|待命名|untitled)$/i.test(title)) return null;
+        const ls = localIndex.byText.get(title) || [];
+        const rs = remoteIndex.byText.get(title) || [];
+        return ls.length === 1 && rs.length === 1 ? rs[0] : null;
+    }
+    async load(comicId, chapterIds) {
+        comicId = String(comicId);
+        if (!/^\d{1,20}$/.test(comicId) || !Array.isArray(chapterIds)) return {};
+        const ids = Array.from(new Set(chapterIds.filter(x => typeof x === 'string' && /^\d{1,20}$/.test(x)))).slice(0, 8);
+        if (!ids.length) return {};
+        const key = JSON.stringify([comicId, ids]);
+        if (this.flights.has(key)) return this.flights.get(key);
+        const ctx = { end: Date.now() + 18000, expired: false };
+        let timer;
+        const work = this.run(ctx, comicId, ids).catch(() => ({}));
+        const pending = Promise.race([work, new Promise(resolve => {
+            timer = setTimeout(() => { ctx.expired = true; resolve({}); }, 18000);
+        })]).finally(() => { if (timer) clearTimeout(timer); this.flights.delete(key); });
+        this.flights.set(key, pending);
+        return pending;
+    }
+    async run(ctx, comicId, ids) {
+        const p = this.provider, out = {};
+        const local = await p.local(ctx, comicId);
+        let bound = null;
+        // Explicit work binding remains available even when comments are off.
+        const setting = this.source.loadSetting('tencentCommentBindings');
+        if (setting != null && setting !== '') {
+            let bindings;
+            try { bindings = typeof setting === 'string' ? JSON.parse(setting) : setting; } catch (_) { return out; }
+            if (!bindings || Array.isArray(bindings) || typeof bindings !== 'object') return out;
+            if (Object.prototype.hasOwnProperty.call(bindings, comicId)) {
+                bound = String(bindings[comicId]);
+                if (!/^\d{1,20}$/.test(bound)) return out;
+            }
+        }
+        const remote = await p.binding(ctx, comicId, local, bound);
+        // Identity/catalog matching can be cached. Like counts are ALWAYS live.
+        // Sharing an unfinished request only deduplicates concurrent callers; no TTL cache.
+        let flight = this.catalogFlight;
+        if (!flight || flight.comicId !== remote.id) {
+            const promise = p.api(ctx, '/13.1.2/Comic/comicChapterList/comic_id/' + remote.id, true);
+            flight = { comicId: remote.id, promise };
+            this.catalogFlight = flight;
+            promise.then(() => { if (this.catalogFlight === flight) this.catalogFlight = null; },
+                         () => { if (this.catalogFlight === flight) this.catalogFlight = null; });
+        }
+        const obj = await flight.promise;
+        p.check(ctx);
+        const rows = obj.data && obj.data.chapter_list;
+        if (!Array.isArray(rows) || !rows.length || rows.length > 10000) return out;
+        const counts = new Map();
+        for (const row of rows) {
+            const id = String(row && row.chapter_id || '');
+            if (!/^\d{1,20}$/.test(id) || counts.has(id)) throw p.fail('schema');
+            counts.set(id, { likes: p.count(row.good_count), date: typeof row.update_date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(row.update_date) ? row.update_date : null });
+        }
+        const normalizedLocal = local.chapters.map(x => ({ ...x, title: LiziChapterMetadata.title(x.title) }));
+        const normalizedRemote = remote.chapters.map(x => ({ ...x, title: LiziChapterMetadata.title(x.title) }));
+        // Build both indexes once; parity with LiziTencentComments.matchChapter is
+        // covered by test.cjs over the real 385x384 catalog.
+        const index = { local: LiziChapterMetadata.prepared(normalizedLocal), remote: LiziChapterMetadata.prepared(normalizedRemote) };
+        for (let i = 0; i < normalizedLocal.length; i++) {
+            const row = normalizedLocal[i];
+            const target = LiziChapterMetadata.match(row, normalizedLocal, normalizedRemote, index);
+            const fact = target && counts.get(target.id);
+            out[row.id] = {
+                ...(fact && fact.date ? { tencentUpdateTime: fact.date } : {}),
+                ...(fact && Number.isSafeInteger(fact.likes) && fact.likes >= 0 ? { likesCount: fact.likes, likesSource: 'tencent' } : {})
+            };
+            if (i % 16 === 15) { await new Promise(resolve => setTimeout(resolve, 0)); p.check(ctx); }
+        }
+        return out;
+    }
+}
