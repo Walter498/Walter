@@ -11,7 +11,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.33.24";
+    version = "2.33.25";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -890,6 +890,10 @@ class Lizimh extends ComicSource {
     _orderCache = {};
     // 章節序號 key -> 真正章節 id（v2.33.4：key 改用序號，見 loadInfo 註解）
     _epMap = {};
+    // One source-instance seed for chapter names and Lizi created_at dates.
+    // Tencent likes are deliberately kept outside this cache.
+    _chapterInfoCache = {};
+    _chapterInfoFlights = {};
     // 真正章節 id -> 封面路徑（舊資料 / 舊 epId 回退用）
     _coverById = {};
     // 章節頁數快取: dir -> pageCount (記憶體)
@@ -1356,6 +1360,9 @@ class Lizimh extends ComicSource {
         },
 
         loadInfo: async (id) => {
+            id = String(id);
+            if (this._chapterInfoFlights[id]) return this._chapterInfoFlights[id];
+            const infoFlight = (async () => {
             let data = await Lizimh.getJson(`/app/api/v2/detail/${id}`);
             let chapters = {};
             let covers = {};
@@ -1416,7 +1423,7 @@ class Lizimh extends ComicSource {
             };
             if (data.score && Number(data.score) > 0) tags["评分"] = ["评分" + data.score];
 
-            return new ComicDetails({
+            const details = new ComicDetails({
                 title: data.name || "",
                 cover: this.abs(data.picY || data.picX),
                 description: data.content || "",
@@ -1427,6 +1434,12 @@ class Lizimh extends ComicSource {
                 stars: data.score ? Number(data.score) : null,
                 updateTime: lastIso ? Lizimh.fmtDate(lastIso) : null,
             });
+            this._chapterInfoCache[id] = details;
+            return details;
+            })();
+            this._chapterInfoFlights[id] = infoFlight;
+            infoFlight.then(() => { if (this._chapterInfoFlights[id] === infoFlight) delete this._chapterInfoFlights[id]; }, () => { delete this._chapterInfoFlights[id]; });
+            return infoFlight;
         },
 
         loadEp: async (comicId, epId) => {
@@ -2603,7 +2616,13 @@ class LiziTencentComments {
             this.check(ctx);
             const chapters = LiziTencentComments.catalog(info && info.chapters);
             if (!chapters || !LiziTencentComments.text(info.title)) throw this.fail('local');
-            return { title: LiziTencentComments.text(info.title), authors: LiziTencentComments.authors(info.tags && info.tags['作者']), chapters };
+            const dates = {};
+            const sourceMeta = info && info.chapterMetadata && typeof info.chapterMetadata === 'object' ? info.chapterMetadata : {};
+            for (const id of Object.keys(chapters)) {
+                const m = sourceMeta[id];
+                if (m && typeof m.updateTime === 'string' && m.updateTime) dates[id] = { updateTime: m.updateTime, dateSource: 'lizi' };
+            }
+            return { title: LiziTencentComments.text(info.title), authors: LiziTencentComments.authors(info.tags && info.tags['作者']), chapters, dates };
         });
     }
     async remote(ctx, id) {
@@ -3353,7 +3372,7 @@ class LiziChapterMetadata {
     async load(comicId, chapterIds) {
         comicId = String(comicId);
         if (!/^\d{1,20}$/.test(comicId) || !Array.isArray(chapterIds)) return {};
-        const ids = Array.from(new Set(chapterIds.filter(x => typeof x === 'string' && /^\d{1,20}$/.test(x)))).slice(0, 8);
+        const ids = Array.from(new Set(chapterIds.filter(x => typeof x === 'string' && /^\d{1,20}$/.test(x))));
         if (!ids.length) return {};
         const key = JSON.stringify([comicId, ids]);
         if (this.flights.has(key)) return this.flights.get(key);
@@ -3366,9 +3385,34 @@ class LiziChapterMetadata {
         this.flights.set(key, pending);
         return pending;
     }
+    async local(ctx, comicId) {
+        // Details are a seed for this entry, never a completed loadInfo cache.
+        const seed = await (this.source._chapterInfoFlights[comicId] ||
+            this.source._chapterInfoCache[comicId] || this.source.comic.loadInfo(comicId));
+        this.provider.check(ctx);
+        if (!this.locals) this.locals = new Map();
+        const cached = this.locals.get(comicId);
+        if (cached && cached.seed === seed) return cached.local;
+        const chapters = LiziTencentComments.catalog(seed && seed.chapters);
+        if (!chapters || !LiziTencentComments.text(seed.title)) throw this.provider.fail('local');
+        const dates = {}, sourceMeta = seed.chapterMetadata || {};
+        for (const row of chapters) {
+            const m = sourceMeta[row.id];
+            if (m && typeof m.updateTime === 'string' && m.updateTime) dates[row.id] = { updateTime: m.updateTime, dateSource: 'lizi' };
+        }
+        const local = { title: LiziTencentComments.text(seed.title), authors: LiziTencentComments.authors(seed.tags && seed.tags['作者']), chapters, dates };
+        this.locals.set(comicId, { seed, local });
+        return local;
+    }
+    withDates(local, ids, out) {
+        for (const id of ids) if (local && local.dates && local.dates[id]) out[id] = { ...local.dates[id] };
+        return out;
+    }
     async run(ctx, comicId, ids) {
         const p = this.provider, out = {};
-        const local = await p.local(ctx, comicId);
+        let local, remote;
+        try { local = await this.local(ctx, comicId); } catch (_) { return out; }
+        this.withDates(local, ids, out);
         let bound = null;
         // Explicit work binding remains available even when comments are off.
         const setting = this.source.loadSetting('tencentCommentBindings');
@@ -3381,7 +3425,9 @@ class LiziChapterMetadata {
                 if (!/^\d{1,20}$/.test(bound)) return out;
             }
         }
-        const remote = await p.binding(ctx, comicId, local, bound);
+        try { remote = await p.binding(ctx, comicId, local, bound); }
+        catch (_) { return out; }
+        try {
         // Identity/catalog matching can be cached. Like counts are ALWAYS live.
         // Sharing an unfinished request only deduplicates concurrent callers; no TTL cache.
         let flight = this.catalogFlight;
@@ -3412,11 +3458,13 @@ class LiziChapterMetadata {
             const target = LiziChapterMetadata.match(row, normalizedLocal, normalizedRemote, index);
             const fact = target && counts.get(target.id);
             out[row.id] = {
+                ...(out[row.id] || {}),
                 ...(fact && fact.date ? { tencentUpdateTime: fact.date } : {}),
                 ...(fact && Number.isSafeInteger(fact.likes) && fact.likes >= 0 ? { likesCount: fact.likes, likesSource: 'tencent' } : {})
             };
             if (i % 16 === 15) { await new Promise(resolve => setTimeout(resolve, 0)); p.check(ctx); }
         }
         return out;
+        } catch (_) { return this.withDates(local, ids, {}); }
     }
 }
