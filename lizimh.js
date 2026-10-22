@@ -11,7 +11,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.33.26";
+    version = "2.33.27";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -2558,9 +2558,9 @@ class LiziTencentComments {
         const composite = kind === 'main' && rest.match(/^(\d{1,4})[-－](0\d{1,5})([^\d].*)$/);
         if (composite) rest = composite[2] + composite[3];
         const padded = kind === 'main' && rest.match(/^(0\d{1,5})([^\d].*)$/);
-        const m = rest.match(/^第?(\d+)(话|章|回)?(.*)$/) ||
-            rest.match(new RegExp('^第?(' + token + ')(话|章|回)?(.*)$'));
-        const bare = kind === 'main' && /^\d+[^\d].*$/.test(rest);
+        const m = rest.match(/^第?\s*(\d+)\s*(话|章|回)?(.*)$/) ||
+            rest.match(new RegExp('^第?\\s*(' + token + ')\\s*(话|章|回)?(.*)$'));
+        const bare = kind === 'main' && /^第?\s*\d+[^\d].*$/.test(rest);
         if (!m || (kind === 'main' && !m[2] && !bare)) return null;
         const number = this.number(m[1]);
         if (number == null) return null;
@@ -2576,14 +2576,63 @@ class LiziTencentComments {
         return { title, identity: JSON.stringify([kind, volume, number, m[2] || (bare ? '话' : null), part]),
             subtitle: tail, padded: !!padded && !m[2], composite: !!composite };
     }
-    static compatibleSubtitle(a, b) {
+    static subtitleKey(value) {
+        // Cosmetic punctuation is not chapter identity; part/range guards run first.
+        return value.replace(/[\s!！?？,，。:：;；、·‘’“”"'「」『』《》<>（）()\[\]【】—–-]/g, '');
+    }
+    static compatibleSubtitle(a, b, anchored = false) {
         if (!a || !b) return false;
         if (a.subtitle === b.subtitle) return true;
         if (!a.subtitle || !b.subtitle) return true;
-        if (!(a.padded && b.composite || b.padded && a.composite)) return false;
-        const short = a.subtitle.length <= b.subtitle.length ? a.subtitle : b.subtitle;
-        const long = short === a.subtitle ? b.subtitle : a.subtitle;
-        return short.length >= 2 && long.endsWith(short);
+        const x = this.subtitleKey(a.subtitle), y = this.subtitleKey(b.subtitle);
+        if (x && x === y) return true;
+        const short = x.length <= y.length ? x : y;
+        const long = x.length <= y.length ? y : x;
+        if (a.padded && b.composite || b.padded && a.composite) {
+            if (short.length >= 2 && long.endsWith(short)) return true;
+        }
+        // Real web catalogs omit the ordinal (091春风). Require unique numbered
+        // identities AND strict anchors on both sides before relaxing subtitles.
+        if (!anchored || !short || !long) return false;
+        if ((long.startsWith(short) || long.endsWith(short)) &&
+            (short.length >= 2 || short.length === 1 && long.length <= 3)) return true;
+        // One typo/omitted character in a substantial subtitle, never number-only.
+        if (short.length < 4 || long.length - short.length > 1) return false;
+        let i = 0, j = 0, edits = 0;
+        while (i < short.length && j < long.length) {
+            if (short[i] === long[j]) { i++; j++; continue; }
+            if (++edits > 1) return false;
+            if (short.length === long.length) i++;
+            j++;
+        }
+        return edits + (long.length - j) + (short.length - i) <= 1;
+    }
+    static contextAnchored(row, target, local, remote, index) {
+        const li = index && index.local || LiziChapterMetadata.prepared(local);
+        const ri = index && index.remote || LiziChapterMetadata.prepared(remote);
+        const parsed = li.parse(row.title);
+        if (!parsed) return false;
+        const identity = JSON.parse(parsed.identity), number = Number(identity[2]);
+        if (identity[0] !== 'main' || identity[4] != null) return false;
+        const pos = local.indexOf(row), targetPos = remote.indexOf(target);
+        if (pos < 0 || targetPos < 0) return false;
+        const evidence = { before: false, after: false };
+        for (let offset = -6; offset <= 6; offset++) {
+            if (!offset || pos + offset < 0 || pos + offset >= local.length) continue;
+            const neighbor = local[pos + offset], a = li.parse(neighbor.title);
+            if (!a || !a.subtitle) continue;
+            const key = JSON.parse(a.identity), delta = Number(key[2]) - number;
+            if (key[0] !== identity[0] || key[1] !== identity[1] ||
+                key[3] !== identity[3] || key[4] != null || !delta || Math.abs(delta) > 3) continue;
+            const ls = li.byIdentity.get(a.identity) || [], rs = ri.byIdentity.get(a.identity) || [];
+            if (ls.length !== 1 || rs.length !== 1) continue;
+            const b = ri.parse(rs[0].title);
+            if (!b || !b.subtitle || this.subtitleKey(a.subtitle) !== this.subtitleKey(b.subtitle)) continue;
+            const remoteOffset = remote.indexOf(rs[0]) - targetPos;
+            if (offset < 0 && remoteOffset < 0) evidence.before = true;
+            if (offset > 0 && remoteOffset > 0) evidence.after = true;
+        }
+        return evidence.before && evidence.after;
     }
     static matchChapter(row, local, remote) {
         const a = this.chapter(row.title);
@@ -2592,7 +2641,8 @@ class LiziTencentComments {
             const targets = remote.filter(x => { const p = this.chapter(x.title); return p && p.identity === a.identity; });
             if (locals.length !== 1 || targets.length !== 1) return null;
             const b = this.chapter(targets[0].title);
-            if (!this.compatibleSubtitle(a, b)) return null;
+            if (!this.compatibleSubtitle(a, b) &&
+                !(this.contextAnchored(row, targets[0], local, remote) && this.compatibleSubtitle(a, b, true))) return null;
             return targets[0];
         }
         const title = this.text(row.title);
@@ -3374,7 +3424,9 @@ class LiziChapterMetadata {
             const targets = remoteIndex.byIdentity.get(a.identity) || [];
             if (locals.length !== 1 || targets.length !== 1) return null;
             const b = remoteIndex.parse(targets[0].title);
-            if (!LiziTencentComments.compatibleSubtitle(a, b)) return null;
+            if (!LiziTencentComments.compatibleSubtitle(a, b) &&
+                !(LiziTencentComments.contextAnchored(row, targets[0], local, remote, { local: localIndex, remote: remoteIndex }) &&
+                  LiziTencentComments.compatibleSubtitle(a, b, true))) return null;
             return targets[0];
         }
         const title = LiziTencentComments.text(row.title);
