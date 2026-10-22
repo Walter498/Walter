@@ -11,7 +11,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.33.25";
+    version = "2.33.26";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -2548,14 +2548,20 @@ class LiziTencentComments {
         return null;
     }
     static chapter(raw) {
-        const title = LiziTencentComments.text(raw).replace(/話/g, '话');
+        const title = this.titleKey(raw).replace(/話/g, '话');
         const token = '[0-9零一二三四五六七八九十百]+';
         let rest = title, volume = null, kind = 'main';
         const vol = rest.match(new RegExp('^第?(' + token + ')卷\\s*'));
         if (vol) { volume = this.number(vol[1]); if (volume == null) return null; rest = rest.slice(vol[0].length); }
         if (rest.startsWith('番外')) { kind = 'extra'; rest = rest.slice(2).trim(); }
-        const m = rest.match(new RegExp('^第?(' + token + ')(话|章|回)?(.*)$'));
-        if (!m || (kind === 'main' && !m[2])) return null;
+        // A catalog ordinal is not the chapter number: 94-091春风 is #91.
+        const composite = kind === 'main' && rest.match(/^(\d{1,4})[-－](0\d{1,5})([^\d].*)$/);
+        if (composite) rest = composite[2] + composite[3];
+        const padded = kind === 'main' && rest.match(/^(0\d{1,5})([^\d].*)$/);
+        const m = rest.match(/^第?(\d+)(话|章|回)?(.*)$/) ||
+            rest.match(new RegExp('^第?(' + token + ')(话|章|回)?(.*)$'));
+        const bare = kind === 'main' && /^\d+[^\d].*$/.test(rest);
+        if (!m || (kind === 'main' && !m[2] && !bare)) return null;
         const number = this.number(m[1]);
         if (number == null) return null;
         let tail = m[3].trim(), part = null;
@@ -2567,7 +2573,17 @@ class LiziTencentComments {
         // Residual part markers are ambiguous identity, never ordinary subtitles.
         if (/^[.．/、~～]|^[-－]\s*\d|上下|[上中下]篇|(?:^|[\s:：()（）-])[上中下](?:$|[\s)）])|合并|合併|番外|特别|特別/.test(tail)) return null;
         tail = tail.replace(/^[：:]\s*|^[-－—–]\s+/, '').trim();
-        return { title, identity: JSON.stringify([kind, volume, number, m[2] || null, part]), subtitle: tail };
+        return { title, identity: JSON.stringify([kind, volume, number, m[2] || (bare ? '话' : null), part]),
+            subtitle: tail, padded: !!padded && !m[2], composite: !!composite };
+    }
+    static compatibleSubtitle(a, b) {
+        if (!a || !b) return false;
+        if (a.subtitle === b.subtitle) return true;
+        if (!a.subtitle || !b.subtitle) return true;
+        if (!(a.padded && b.composite || b.padded && a.composite)) return false;
+        const short = a.subtitle.length <= b.subtitle.length ? a.subtitle : b.subtitle;
+        const long = short === a.subtitle ? b.subtitle : a.subtitle;
+        return short.length >= 2 && long.endsWith(short);
     }
     static matchChapter(row, local, remote) {
         const a = this.chapter(row.title);
@@ -2576,8 +2592,7 @@ class LiziTencentComments {
             const targets = remote.filter(x => { const p = this.chapter(x.title); return p && p.identity === a.identity; });
             if (locals.length !== 1 || targets.length !== 1) return null;
             const b = this.chapter(targets[0].title);
-            // A missing subtitle is allowed, conflicting nonempty subtitles are not.
-            if (a.subtitle && b.subtitle && a.subtitle !== b.subtitle) return null;
+            if (!this.compatibleSubtitle(a, b)) return null;
             return targets[0];
         }
         const title = this.text(row.title);
@@ -3022,7 +3037,10 @@ class QingmanProvider {
         // Entire title is the anchor, including volume/subtitle/upper/lower part.
         const a = local.filter(x => this.key(x.title) === key);
         const b = remote.filter(x => this.key(x.title) === key);
-        return key && a.length === 1 && b.length === 1 ? b[0] : null;
+        if (key && a.length === 1 && b.length === 1) return b[0];
+        const parsed = LiziTencentComments.chapter(row.title);
+        // Keep the provider's exact-title contract for ordinary titles.
+        return parsed && parsed.padded ? LiziTencentComments.matchChapter(row, local, remote) : null;
     }
     static unavailable(reason) {
         return { comments: [], maxPage: 0, total: null, available: false, reason,
@@ -3318,7 +3336,6 @@ class LiziChapterMetadata {
     }
     static title(value) {
         let title = LiziTencentComments.titleKey(String(value || ''));
-        // Bare numbered source titles (053有一事相求) and 腾讯 chapter titles.
         const m = title.match(/^(\d{1,6})\s*([^\d\s:：.．/、~～—–-].*)$/);
         if (m && !/^[话話章回]/.test(m[2])) title = '第' + Number(m[1]) + '话 ' + m[2];
         return title;
@@ -3357,8 +3374,7 @@ class LiziChapterMetadata {
             const targets = remoteIndex.byIdentity.get(a.identity) || [];
             if (locals.length !== 1 || targets.length !== 1) return null;
             const b = remoteIndex.parse(targets[0].title);
-            // A missing subtitle is allowed, conflicting nonempty subtitles are not.
-            if (a.subtitle && b.subtitle && a.subtitle !== b.subtitle) return null;
+            if (!LiziTencentComments.compatibleSubtitle(a, b)) return null;
             return targets[0];
         }
         const title = LiziTencentComments.text(row.title);
@@ -3425,20 +3441,25 @@ class LiziChapterMetadata {
                 if (!/^\d{1,20}$/.test(bound)) return out;
             }
         }
+        const catalogFor = (id) => {
+            // Like counts are live; share only an unfinished catalog request.
+            let flight = this.catalogFlight;
+            if (!flight || flight.comicId !== id) {
+                const promise = p.api(ctx, '/13.1.2/Comic/comicChapterList/comic_id/' + id, true);
+                flight = { comicId: id, promise };
+                this.catalogFlight = flight;
+                promise.then(() => { if (this.catalogFlight === flight) this.catalogFlight = null; },
+                             () => { if (this.catalogFlight === flight) this.catalogFlight = null; });
+            }
+            return flight.promise;
+        };
+        // A manual ID is known before title verification, so overlap both requests.
+        // Never consume its catalog until the existing binding checks succeed.
+        const catalogPending = bound ? catalogFor(bound) : null;
         try { remote = await p.binding(ctx, comicId, local, bound); }
         catch (_) { return out; }
         try {
-        // Identity/catalog matching can be cached. Like counts are ALWAYS live.
-        // Sharing an unfinished request only deduplicates concurrent callers; no TTL cache.
-        let flight = this.catalogFlight;
-        if (!flight || flight.comicId !== remote.id) {
-            const promise = p.api(ctx, '/13.1.2/Comic/comicChapterList/comic_id/' + remote.id, true);
-            flight = { comicId: remote.id, promise };
-            this.catalogFlight = flight;
-            promise.then(() => { if (this.catalogFlight === flight) this.catalogFlight = null; },
-                         () => { if (this.catalogFlight === flight) this.catalogFlight = null; });
-        }
-        const obj = await flight.promise;
+        const obj = await (catalogPending || catalogFor(remote.id));
         p.check(ctx);
         const rows = obj.data && obj.data.chapter_list;
         if (!Array.isArray(rows) || !rows.length || rows.length > 10000) return out;
@@ -3448,8 +3469,10 @@ class LiziChapterMetadata {
             if (!/^\d{1,20}$/.test(id) || counts.has(id)) throw p.fail('schema');
             counts.set(id, { likes: p.count(row.good_count), date: typeof row.update_date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(row.update_date) ? row.update_date : null });
         }
-        const normalizedLocal = local.chapters.map(x => ({ ...x, title: LiziChapterMetadata.title(x.title) }));
-        const normalizedRemote = remote.chapters.map(x => ({ ...x, title: LiziChapterMetadata.title(x.title) }));
+        // Preserve raw numbering for the constrained padded/ordinal fallback.
+        // prepared() normalizes exact-title keys without rewriting identities.
+        const normalizedLocal = local.chapters;
+        const normalizedRemote = remote.chapters;
         // Build both indexes once; parity with LiziTencentComments.matchChapter is
         // covered by test.cjs over the real 385x384 catalog.
         const index = { local: LiziChapterMetadata.prepared(normalizedLocal), remote: LiziChapterMetadata.prepared(normalizedRemote) };
