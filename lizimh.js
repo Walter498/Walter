@@ -11,13 +11,14 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.33.27";
+    version = "2.33.32";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
     // v2.32.0：回到最保守的寫法（App 的 QuickJS 引擎對 class 靜態 getter /
     // 複雜靜態欄位支援不佳，會導致整個源 init 失敗）。
     // 主域名 + 備援域名，失敗時逐一重試，成功的那台記在 _apiOk 裡。
+    static jpPublic = "https://t1.imge.store";
     static api = "http://ai.xajtl.com";
     static apiFallback = "http://ai.qsmm.fun";
     static _useFallback = false;
@@ -398,55 +399,113 @@ class Lizimh extends ComicSource {
         return Lizimh.lines[i].url;
     }
 
-    // Official JWT lists contain generator markers. Keep their order but use
-    // the configured plain-image CDN; the marker-specific host serves binary data.
-    // Persist paths, not a selected CDN URL. Also repair pre-fix absolute caches.
+    imageNetworkKey(value) {
+        return String(value || '').replace(/(?:#|&)__lizi_decoder=v1$/, '');
+    }
+    imageCacheKey(value) {
+        const url=this.imageNetworkKey(value);
+        return url+(url.indexOf('#')<0?'#':'&')+'__lizi_decoder=v1';
+    }
+    // Keep storage-family markers; never rewrite all /101 or /102 paths.
     officialImagePath(value) {
-        const text = String(value || "");
-        const marker = text.match(/\$jp\$(?:cf)?/);
-        if (marker) return text.slice(marker.index + marker[0].length);
-        for (const line of Lizimh.lines) {
-            if (line.proxy && line.src && text.startsWith(line.url)) {
-                try {
-                    const src = decodeURIComponent(text.slice(line.url.length));
-                    if (src.startsWith(line.src + "/")) return src.slice(line.src.length);
-                } catch (_) {}
-            }
+        let text=this.imageNetworkKey(value);
+        const marker=text.match(/^(?:https?:\/\/(?:media\.imgo\.buzz|cdn\.lzimg\.xyz|i\.lzimg\.xyz))?\$jp\$(?:cf)?/);
+        if(marker) {
+            const rest=text.slice(marker[0].length).replace(/^https?:\/\/[^/]+/,'');
+            return '$jp$'+(rest.startsWith('/')?rest:'/'+rest);
         }
-        const m = text.match(/^https?:\/\/([^/]+)(\/.*)$/);
-        if (m) {
-            const host = m[1].toLowerCase();
-            if (host === "pic.lizimh.net" || host === "img2.mechat.fun") return m[2];
-            const known = ["cdn.lzimg.xyz", "i.lzimg.xyz", "cf-1.imgio.club", "media.imgo.buzz", "img.mechat.fun"];
-            if (known.indexOf(host) >= 0 || Lizimh.lines.some(x => !x.proxy && text.startsWith(x.url + "/"))) return m[2];
+        for(const line of Lizimh.lines)if(line.proxy&&line.src&&text.startsWith(line.url)) {
+            try{text=decodeURIComponent(text.slice(line.url.length));}catch(_){}
+            break;
         }
+        const absolute=text.match(/^https?:\/\/([^/]+)(\/.*)$/);
+        if(!absolute)return text;
+        const host=absolute[1].toLowerCase();
+        if(/^(?:t1\.imge\.store|pic\.lizimh\.net|img2\.mechat\.fun)$/.test(host))return '$jp$'+absolute[2];
+        if(/^(?:cdn\.lzimg\.xyz|i\.lzimg\.xyz|cf-1\.imgio\.club|media\.imgo\.buzz|img\.mechat\.fun)$/.test(host))return absolute[2];
         return text;
     }
-
     officialImageUrls(values) {
-        const line = this.currentLine();
-        return values.map(value => {
-            const path = this.officialImagePath(value);
-            const url = this.abs(path);
-            this._imgLine[url] = line;
-            this._imgPath[url] = path;
-            return url;
+        return values.map(value=>{
+            const path=this.officialImagePath(value),url=this.lineAbs(path);
+            this._imgLine[url]=this.currentLine();this._imgPath[url]=path;
+            return this.imageCacheKey(url);
         });
     }
-
-    // 由相對路徑構造絕對 URL (供探測與換線使用)
-    lineAbs(path, idx) {
-        path = this.officialImagePath(path);
-        let i = (idx === undefined || idx === null) ? this.currentLine() : idx;
-        if (i < 0 || i >= Lizimh.lines.length) i = 0;
-        let line = Lizimh.lines[i];
-        if (line.proxy && line.src) {
-            return line.url + encodeURIComponent(line.src + path);
+    lineAbs(value,idx) {
+        const path=this.officialImagePath(value);
+        if(/^https?:\/\//.test(path))return path;
+        if(path.startsWith('$jp$'))return Lizimh.jpPublic+path.slice(4);
+        const dir=path.replace(/\/[^/]*$/,'');
+        if(this._imageRouteByDir[dir])return this._imageRouteByDir[dir]+path;
+        let i=idx==null?this.currentLine():idx;
+        if(i<0||i>=Lizimh.lines.length)i=0;
+        const line=Lizimh.lines[i];
+        if(line.proxy&&line.src)return line.url+encodeURIComponent(line.src+path);
+        return line.url+path;
+    }
+    abs(path) {return path?this.imageCacheKey(this.lineAbs(path)):'';}
+    _imageRouteByDir={};
+    _imageRouteFlights={};
+    async verifyCoverRoute(cover) {
+        const path=this.officialImagePath(cover);
+        if(path.startsWith('$jp$')||/^https?:\/\//.test(path))return;
+        const dir=path.replace(/\/[^/]*$/,'');
+        if(this._imageRouteByDir[dir])return;
+        if(this._imageRouteFlights[dir])return this._imageRouteFlights[dir];
+        const task=(async()=>{
+            const first=this.lineAbs(path),second=Lizimh.jpPublic+path;
+            for(const u of [first,second].filter((u,i,a)=>a.indexOf(u)===i)) {
+                try {
+                    const r=await this.diagnosticTimeout(fetch(u,{headers:{'User-Agent':'Mozilla/5.0'}}),10000);
+                    if(r.status!==200)continue;
+                    const bytes=await this.diagnosticTimeout(r.arrayBuffer(),10000);
+                    LiziImageCodec.decode(bytes,u);
+                    if(u===second&&u!==first)this._imageRouteByDir[dir]=Lizimh.jpPublic;
+                    return;
+                }catch(_){}
+            }
+        })();
+        this._imageRouteFlights[dir]=task;
+        try{await task;}finally{delete this._imageRouteFlights[dir];}
+    }
+    imageLoadingConfig(value) {
+        const path=this.officialImagePath(this.imageNetworkKey(value));
+        const candidates=[this.lineAbs(path)];
+        if(path.startsWith('$jp$')) {
+            const clean=path.slice(4);
+            candidates.push('https://media.imgo.buzz'+clean,'http://img2.mechat.fun'+clean);
+        }else if(path.startsWith('/')) {
+            candidates.push('https://media.imgo.buzz'+path,Lizimh.jpPublic+path);
+            for(let i=0;i<Lizimh.lines.length;i++)if(!Lizimh.lines[i].proxy)candidates.push(this.lineAbs(path,i));
         }
-        return line.url + path;
+        const urls=candidates.filter((u,i,a)=>/^https?:\/\//.test(u)&&a.indexOf(u)===i);
+        let index=0;
+        const next=()=>{
+            if(index>=urls.length)return undefined;
+            const url=urls[index++];
+            return {url,headers:{'User-Agent':'Mozilla/5.0'},onResponse:body=>LiziImageCodec.decode(body,url),onLoadFailed:next};
+        };
+        return next();
+    }
+    async thumbnailLoadingConfig(value) {
+        const path=this.officialImagePath(value);
+        if(path.indexOf('/101/')===0)await this.verifyCoverRoute(path);
+        let config=this.imageLoadingConfig(value);const first=config;
+        // Thumbnail loading has no host onLoadFailed loop. Old marked files
+        // may remain plaintext on media: probe their real URL, never host root.
+        if(path.startsWith('$jp$')&&!/^\$jp\$\/(?:101|102)\//.test(path)) {
+            while(config) {
+                try {
+                    const r=await this.diagnosticTimeout(Network.sendRequest('HEAD',config.url,{'User-Agent':'Mozilla/5.0'}),3500);
+                    if(r.status===200||r.status===206)return config;
+                }catch(_){}
+                config=config.onLoadFailed();
+            }
+        }
+        return first;
     }
 
-    // 解析服務端下發的線路 JS (img_generator.code), 跳過加密線路
     static parseGenerators(code, generators) {
         let text = "";
         try {
@@ -454,6 +513,8 @@ class Lizimh extends ComicSource {
         } catch (e) {
             text = "";
         }
+        const r2 = text.match(/(?:var|let|const)\s+R2_PUBLIC\s*=\s*["'](https?:\/\/[^"']+)["']/);
+        if (r2 && /^https?:\/\/[^/?#]+\/?$/.test(r2[1])) Lizimh.jpPublic = r2[1].replace(/\/$/, "");
         let out = [];
         for (let gen of generators || []) {
             if (gen.encrypt === true) continue;      // 加密線路: 插件無法解碼, 直接跳過
@@ -490,16 +551,6 @@ class Lizimh extends ComicSource {
         return out;
     }
 
-    abs(path) {
-        if (!path) return "";
-        path = this.officialImagePath(path);
-        if (path.startsWith("http")) return path;
-        let line = Lizimh.lines[this.currentLine()] || Lizimh.lines[0];
-        if (line.proxy && line.src) {
-            return line.url + encodeURIComponent(line.src + path);
-        }
-        return line.url + path;
-    }
 
     // 測速: 對每條線發一次 HEAD, 按延遲排序 (auto 模式使用)
     async speedTest() {
@@ -865,7 +916,7 @@ class Lizimh extends ComicSource {
                 delete this._verified[dir];
                 // 官方順序快取（記憶體 + 持久化）
                 delete this._officialCache[cid];
-                try { this.saveData("officialPics_" + cid, ""); } catch (e) {}
+                try { this.saveData("officialPics_enc1_" + this.resolveEp(id, cid), ""); } catch (e) {}
             }
         }
         try { delete this._coverCache[id]; delete this._orderCache[id]; delete this._epMap[id]; delete this._coverById[id]; } catch (e) {}
@@ -935,64 +986,37 @@ class Lizimh extends ComicSource {
     // 有些章節是人工上傳、檔名編號與閱讀順序不一致（例：第153话 官方順序是
     // 1..12, 49, 13, 14...），只有官方接口回的 pics 才是正確順序。
     async officialPics(chapterId) {
-        // 沒有章節 id 就不要發請求（日誌曾出現 chapter/v3/null）
-        if (chapterId === null || chapterId === undefined || String(chapterId) === "") return null;
-        let token = "";
-        try { token = String(this.loadSetting("authToken") || "").trim(); } catch (e) {}
+        if (!/^\d+$/.test(String(chapterId || ''))) return null;
+        let token='';
+        try { token=String(this.loadSetting('authToken') || '').trim(); } catch (_) {}
         token = token.replace(/^jwt:\s*/i, "").replace(/^Bearer\s+/i, "").trim();
         if (!token) return null;
-        let key = "officialPics_" + String(chapterId);
-        // 失敗冷卻：接口掛掉/限流時不要每開一章都卡一次
+        const id=String(chapterId),key='officialPics_enc1_'+id;
+        if (this._officialCache[id]) return this.officialImageUrls(this._officialCache[id]);
         try {
-            let until = parseInt(this.loadData("officialPicsSignedCooldown") || "0", 10) || 0;
-            if (Date.now() < until) return null;
-        } catch (e) {}
-        if (this._officialCache[String(chapterId)]) {
-            return this.officialImageUrls(this._officialCache[String(chapterId)]);
+            const saved=JSON.parse(this.loadData(key)||'null');
+            if(Array.isArray(saved)&&saved.length&&saved.every(x=>typeof x==='string')) {
+                this._officialCache[id]=saved;
+                return this.officialImageUrls(saved);
+            }
+        } catch (_) {}
+        // Do not inherit the old global ten-minute cooldown or stripped-marker
+        // cache. That state cannot distinguish a new user-supplied credential.
+        for (const base of [Lizimh.api,Lizimh.apiFallback]) {
+            try {
+                const r=await this.diagnosticTimeout(Network.get(
+                    base+Lizimh.signedPath('/app/api/chapter/v3/'+id),
+                    Lizimh.apiHeaders({authorization:token})),15000);
+                if(r.status!==200) continue;
+                const j=JSON.parse(r.body),pics=j&&j.data&&j.data.pics;
+                if(j.code!==201||!Array.isArray(pics)||!pics.length||!pics.every(x=>typeof x==='string')) continue;
+                const paths=pics.map(x=>this.officialImagePath(x));
+                this._officialCache[id]=paths;
+                try { this.saveData(key,JSON.stringify(paths)); } catch (_) {}
+                return this.officialImageUrls(paths);
+            } catch (_) {}
         }
-        // 持久化快取：官方順序不會變，抓過一次就存起來
-        //（這個接口會消耗帳號的閱讀額度，別重複抓）
-        try {
-            let saved = this.loadData(key);
-            if (saved) {
-                let arr = JSON.parse(saved);
-                if (arr && arr.length) {
-                    arr = arr.map(x => this.officialImagePath(x));
-                    this._officialCache[String(chapterId)] = arr;
-                    try { this.saveData(key, JSON.stringify(arr)); } catch (_) {}
-                    return this.officialImageUrls(arr);
-                }
-            }
-        } catch (e) {}
-        try {
-            let res = null;
-            const bases = [Lizimh._useFallback ? Lizimh.apiFallback : Lizimh.api,
-                           Lizimh._useFallback ? Lizimh.api : Lizimh.apiFallback];
-            for (let bi = 0; bi < bases.length && (!res || res.status !== 200); bi++) {
-                try {
-                    res = await Network.get(
-                        bases[bi] + Lizimh.signedPath("/app/api/chapter/v3/" + chapterId),
-                        Lizimh.apiHeaders({ "authorization": token }));
-                    if (res && res.status === 200) Lizimh._useFallback = bases[bi] === Lizimh.apiFallback;
-                } catch (e) {
-                    res = null;
-                }
-            }
-            if (!res || res.status !== 200) {
-                try { this.saveData("officialPicsSignedCooldown", String(Date.now() + 10 * 60 * 1000)); } catch (e) {}
-                return null;
-            }
-            if (!res || res.status !== 200) return null;
-            let data = JSON.parse(res.body);
-            let pics = (data && data.data && data.data.pics) || [];
-            if (!pics.length) return null;
-            let out = pics.map((x) => this.officialImagePath(x));
-            this._officialCache[String(chapterId)] = out;
-            try { this.saveData(key, JSON.stringify(out)); } catch (e) {}
-            return this.officialImageUrls(out);
-        } catch (e) {
-            return null;
-        }
+        return null;
     }
 
     // v2.33.4：epId（章節序號 key）→ 真正章節 id。
@@ -1471,31 +1495,144 @@ class Lizimh extends ComicSource {
             let dir = m[1], ext = m[3], coverPage = parseInt(m[2]) || 1;
             let maxPages = 300;
             try { maxPages = parseInt(this.loadSetting("maxPages") || "300"); } catch (e) {}
+            await this.verifyCoverRoute(cover);
             let images = await this.probePages(dir, ext, maxPages, coverPage);
             if (!images.length) throw new Error("该章节图片探测失败");
             let line = this.currentLine();
             for (let u of images) {
                 this._imgLine[u] = line;
-                this._imgPath[u] = u.substring(Lizimh.lines[line].url.length);
+                this._imgPath[u] = this.officialImagePath(u);
             }
-            return { images: images };
+            return { images: images.map(u => this.imageCacheKey(u)) };
         },
 
-        onImageLoad: (url, comicId, epId) => {
-            let self = this;
-            return {
-                headers: {
-                    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
-                },
-                onLoadFailed: () => {
-                    let alt = self.nextLineUrl(url);
-                    if (!alt) return undefined;
-                    return { url: alt };
-                },
-            };
-        },
-        onThumbnailLoad: (url) => { return {}; },
+        onImageLoad: (url, comicId, epId) => this.imageLoadingConfig(url),
+        onThumbnailLoad: (url) => this.thumbnailLoadingConfig(url),
     };
+}
+
+// Image body transform verified against the official mobile xorshift32 loop.
+// Image signatures are used as an overdetermined (96-bit) seed check, not as a
+// substitute for decoding: all candidate outputs were pixel-decoded in tests.
+class LiziImageCodec {
+    static bytes(value) {
+        if (value instanceof ArrayBuffer) return new Uint8Array(value);
+        if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer,value.byteOffset,value.byteLength);
+        if (Array.isArray(value)) return new Uint8Array(value);
+        throw new Error('Invalid image byte response');
+    }
+    static utf8(text) {
+        const out=[];
+        for(let i=0;i<text.length;i++) {
+            let cp=text.codePointAt(i);
+            if(cp>65535)i++;
+            if(cp>=0xd800&&cp<=0xdfff)cp=0xfffd;
+            if(cp<128)out.push(cp);
+            else if(cp<2048)out.push(192|(cp>>6),128|(cp&63));
+            else if(cp<65536)out.push(224|(cp>>12),128|((cp>>6)&63),128|(cp&63));
+            else out.push(240|(cp>>18),128|((cp>>12)&63),128|((cp>>6)&63),128|(cp&63));
+        }
+        return out;
+    }
+    static seed(url,version) {
+        // Official libapp.so 0x4dc208: FNV1a32(UTF8(version + LF + salt
+        // + LF + URI path/query)). Host and fragment never enter the seed.
+        const value=String(url||'').split('#')[0];
+        const absolute=value.match(/^[a-z][a-z0-9+.-]*:\/\/[^/?#]*(.*)$/i);
+        let path=absolute?absolute[1]:value;
+        if(absolute&&(!path||path.charAt(0)==='?'))path='/'+path;
+        const v=version==null||version===''?'v7':String(version);
+        const input=v+'\nimgio-fast-obfuscation-v7\n'+path;
+        let hash=0x811c9dc5;
+        for(const byte of this.utf8(input))hash=Math.imul(hash^byte,0x01000193)>>>0;
+        return hash||0x9e3779b9;
+    }
+    static step(s) {
+        s ^= s << 13;
+        s ^= s >>> 17;
+        s ^= s << 5;
+        return s >>> 0;
+    }
+    static signature(b) {
+        const eq=(offset,text)=>{
+            if (b.length<offset+text.length) return false;
+            for(let j=0;j<text.length;j++) if (b[offset+j]!==text.charCodeAt(j)) return false;
+            return true;
+        };
+        if (b.length>=16 && eq(0,'RIFF') && eq(8,'WEBP') &&
+            (eq(12,'VP8 ')||eq(12,'VP8L')||eq(12,'VP8X')) &&
+            ((b[4]|(b[5]<<8)|(b[6]<<16)|(b[7]<<24))>>>0)+8===b.length) return 'webp';
+        if (b.length>=3 && b[0]===255 && b[1]===216 && b[2]===255) return 'jpeg';
+        if (b.length>=24 && b[0]===137 && eq(1,'PNG\r\n\x1a\n') && eq(12,'IHDR'))return 'png';
+        if (eq(0,'GIF87a') || eq(0,'GIF89a')) return 'gif';
+        if (eq(4,'ftyp') && (eq(8,'avif') || eq(8,'avis'))) return 'avif';
+        return null;
+    }
+    static fingerprint(state) {
+        const out=new Uint8Array(12);
+        for(let i=0;i<12;i++){state=this.step(state);out[i]=state&255;}
+        return out;
+    }
+    static recoverWebPSeed(bytes) {
+        const b=this.bytes(bytes);
+        if(b.length<16 || b.length>50*1024*1024)throw new Error('Invalid encrypted image length');
+        const expected=new Uint8Array(12);expected.set([82,73,70,70]);
+        const size=(b.length-8)>>>0;
+        expected[4]=size&255;expected[5]=(size>>>8)&255;
+        expected[6]=(size>>>16)&255;expected[7]=(size>>>24)&255;
+        expected.set([87,69,66,80],8);
+        const mask=new Uint8Array(12);
+        for(let i=0;i<12;i++)mask[i]=b[i]^expected[i];
+        const columns=[];
+        for(let bit=0;bit<32;bit++)columns.push(this.fingerprint((1<<bit)>>>0));
+        const rows=[];
+        for(let pos=0;pos<96;pos++){
+            let coeff=0;
+            for(let bit=0;bit<32;bit++)if((columns[bit][pos>>>3]>>>(pos&7))&1)coeff|=1<<bit;
+            rows.push({coeff:coeff>>>0,result:(mask[pos>>>3]>>>(pos&7))&1});
+        }
+        for(let bit=0;bit<32;bit++){
+            let pivot=bit;
+            while(pivot<96&&!((rows[pivot].coeff>>>bit)&1))pivot++;
+            if(pivot===96)throw new Error('Image seed matrix is singular');
+            const tmp=rows[pivot];rows[pivot]=rows[bit];rows[bit]=tmp;
+            for(let i=0;i<96;i++)if(i!==bit && ((rows[i].coeff>>>bit)&1)){
+                rows[i].coeff=(rows[i].coeff^rows[bit].coeff)>>>0;
+                rows[i].result^=rows[bit].result;
+            }
+        }
+        let seed=0;
+        for(let bit=0;bit<32;bit++)if(rows[bit].result)seed|=1<<bit;
+        seed>>>=0;
+        const check=this.fingerprint(seed||0x9e3779b9);
+        for(let i=0;i<12;i++)if(check[i]!==mask[i])throw new Error('Image body does not match official transform');
+        return seed;
+    }
+    static transform(input,seed,length) {
+        const data=this.bytes(input),out=new Uint8Array(data);
+        let state=(seed>>>0)||0x9e3779b9;
+        const limit=Math.min(data.length,length>0?length:65536);
+        for(let i=0;i<limit;i++){
+            state=this.step(state);
+            out[i]^=state&255;
+        }
+        return out;
+    }
+    static decode(value,url) {
+        const bytes=this.bytes(value);
+        if(this.signature(bytes)) {
+            return bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength);
+        }
+        let out=this.transform(bytes,this.seed(url),65536);
+        if(!this.signature(out)) {
+            // The host's onResponse API does not expose custom seed headers.
+            // For WebP only, accept a recovered seed iff all 96 header bits
+            // satisfy the same official transform; never patch magic bytes.
+            out=this.transform(bytes,this.recoverWebPSeed(bytes),65536);
+        }
+        if(!this.signature(out))throw new Error('Image body does not match supported official encoding');
+        return out.buffer.slice(out.byteOffset,out.byteOffset+out.byteLength);
+    }
 }
 
 // Offline generated; authorized fixed public-app protocol material, not account credentials.
