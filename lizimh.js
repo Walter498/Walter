@@ -11,7 +11,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.33.32";
+    version = "2.33.33";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -71,92 +71,28 @@ class Lizimh extends ComicSource {
     static fallbackClasses = [["国漫",1],["日漫",2],["韩漫",3],["美漫",4],["精选推荐",5]];
 
     settings = {
-        commentProviderV2: {title: "评论接口（新版路由）", type: "select", options: [{value:"auto",text:"自动：腾讯优先，无评论区时青漫"},{value:"tencent",text:"始终腾讯"},{value:"qingman",text:"始终青漫"}], default:"auto", description:"升级后默认自动；旧版接口偏好不继承。需要固定青漫/腾讯请在此重新选择。不会修改旧设置或账号。"},
-        qingmanCommentsEnabled: {title:"青漫只读评论",type:"select",options:[{value:"on",text:"开启"},{value:"off",text:"关闭"}],default:"on"},
-        manualqingmanbinding: {title:"青漫显式作品/章节绑定 JSON",type:"input",default:"{}",description:'格式 {"栗子作品ID":{"comicId":"青漫作品ID","title":"完整书名","chapters":{"栗子章节ID":{"chapterId":"青漫章节ID","title":"完整章节名"}}}}；可选消歧；未绑定自动搜索完整书名并核对真实目录，不按章节序号猜测。'},
-        tencentCommentsEnabled: {
-            title: "腾讯评论（作品讨论/章节评论）", type: "select",
-            options: [{value: "on", text: "开启"}, {value: "off", text: "关闭"}], default: "on",
-        },
-        tencentCommentSort: {
-            title: "腾讯章节评论排序", type: "select",
-            options: [{value: "new", text: "新评"}, {value: "hot", text: "热评"}, {value: "wonderful", text: "精彩评论"}], default: "new",
-        },
-        tencentCommentBindings: {
-            title: "腾讯作品绑定（可选 JSON）", type: "input", default: "{}",
-            description: '自动匹配不确定时，填 {"栗子作品ID":"腾讯作品ID"}；章节仍按标题核对，不按目录位置猜测。',
-        },
-
-        imageLine: {
-            title: "图片线路 (auto=自动测速)",
-            type: "select",
-            options: [
-                { value: "auto", text: "自动测速 (推荐)" },
-                { value: "0", text: "线路1 (CF优选海外)" },
-                { value: "1", text: "线路2 (mechat)" },
-                { value: "2", text: "线路3 (i.lzimg)" },
-                { value: "3", text: "备用 (cf-1.imgio.club)" },
-            ],
-            default: "auto",
-        },
-        speedTest: {
-            title: "API 节点延迟（验证有效响应）",
-            type: "callback", buttonText: "开始测速",
-            callback: async () => this.runDiagnosticTest(false),
-        },
-        imageSpeedTest: {
-            title: "图片下载测速（会消耗流量）",
-            type: "callback", buttonText: "开始测速",
-            callback: async () => this.runDiagnosticTest(true),
-        },
-        communityCheck: {
-            title: "接口自檢（社區／首頁）",
-            type: "callback",
-            buttonText: "開始檢查",
-            callback: async () => {
-                const lines = [];
-                const check = async (label, path) => {
-                    try {
-                        const data = await Lizimh.getJson(path);
-                        const n = data && data.list ? data.list.length : "-";
-                        lines.push(label + "：OK，項目數 " + n);
-                    } catch (e) {
-                        let msg = String(e);
-                        const http = msg.match(/HTTP \d{3}/);
-                        const code = msg.match(/API code \d+/);
-                        lines.push(label + "：" + (http ? http[0] : code ? code[0] : "失敗"));
-                    }
-                };
-                await check("健康檢查", "/app/api/health");
-                await check("社區帖子", "/app/api/community/posts?page_size=10&sort_type=0");
-                await check("首頁", "/app/api/home/data");
-                const text = "栗子接口自檢：\n" + lines.join("\n");
-                if (typeof UI.showDialog === "function") {
-                    UI.showDialog("接口自檢", text, [
-                        {text: "關閉", callback: () => {}},
-                        {text: "重新檢查", callback: () => this.loadSetting("communityCheck")},
-                    ]);
-                } else {
-                    UI.showMessage(text);
-                }
-            },
-        },
-        authToken: {
-            title: "官方登录凭证 (JWT，选填)",
-            type: "input",
-            default: "",
-            description: "贴上栗子官方 App 的 authorization 值（抓包取得）。填了之后，章节图片会使用官方顺序（解决个别章节图片乱序），不填则用文件名顺序。",
-        },
-        maxPages: {
-            title: "单章最大页数 (探测上限)",
-            type: "select",
-            options: [
-                { value: "150", text: "150 页" },
-                { value: "300", text: "300 页 (默认)" },
-                { value: "600", text: "600 页" },
-            ],
-            default: "300",
-        },
+        commentProviderV2: {title:'评论接口（新版路由）',type:'select',options:[
+            {value:'auto',text:'自动：腾讯优先，无评论区时青漫'},
+            {value:'tencent',text:'始终腾讯'},{value:'qingman',text:'始终青漫'}],default:'auto'},
+        qingmanCommentsEnabled: {type:'internal',default:'on'},
+        manualqingmanbinding: {type:'internal',default:'{}'},
+        tencentCommentsEnabled: {type:'internal',default:'on'},
+        tencentCommentBindings: {type:'internal',default:'{}'},
+        // Keep old saved credentials readable for upgrade compatibility. New
+        // sign-in uses the native account row and never displays the JWT.
+        authToken: {type:'internal',default:''},
+        tencentCommentSort: {title:'腾讯章节评论排序',type:'select',options:[
+            {value:'new',text:'新评'},{value:'hot',text:'热评'},{value:'wonderful',text:'精彩评论'}],default:'new'},
+        imageLine: {title:'图片线路（auto=自动选择）',type:'select',options:[
+            {value:'auto',text:'自动选择（推荐）'},
+            {value:'0',text:'线路1'},{value:'1',text:'线路2'},
+            {value:'2',text:'线路3'},{value:'3',text:'备用'}],default:'auto'},
+        imageSpeedTest: {title:'图片下载测速（真实图片，会消耗流量）',type:'callback',buttonText:'开始测速',
+            callback:async()=>this.runImageSpeedTest()},
+        readingModeTest: {title:'当前读取方式（官方清单 / 公开探测 / 实际CDN）',type:'callback',buttonText:'测试查看',
+            callback:async()=>this.showReadingModeTest()},
+        maxPages: {title:'单章最大页数（探测上限）',type:'select',options:[
+            {value:'150',text:'150 页'},{value:'300',text:'300 页（默认）'},{value:'600',text:'600 页'}],default:'300'},
     };
 
     category = {
@@ -286,6 +222,220 @@ class Lizimh extends ComicSource {
     _imgPath = {};
     _lineOrder = null;   // 測速後的線路優先順序 (索引數組)
 
+    _authEpoch=0;
+    _loginBusy=false;
+
+    normalizeOfficialToken(value) {
+        return String(value||'').replace(/^jwt:\s*/i,'').replace(/^Bearer\s+/i,'').trim();
+    }
+    getOfficialToken() {
+        try{
+            if(this.loadData('officialLogout_v1')===true)return '';
+            let session=this.loadData('officialSession_v1');
+            if(typeof session==='string')session=JSON.parse(session);
+            if(session&&typeof session.token==='string'&&session.token)return this.normalizeOfficialToken(session.token);
+        }catch(_){}
+        let legacy='';
+        try{legacy=this.normalizeOfficialToken(super.loadSetting('authToken'));}catch(_){}
+        if(legacy){
+            try{this.saveData('officialSession_v1',{token:legacy,legacy:true,createdAt:Date.now()});}catch(_){}
+            // Do not fabricate the App's [username,password] account marker.
+            // The native login row remains available to legacy-JWT users.
+        }
+        return legacy;
+    }
+    clearOfficialSession() {
+        this._authEpoch++;
+        this._officialCache={};
+        try{this.deleteData('officialSession_v1');}catch(_){}
+        try{this.saveData('officialLogout_v1',true);}catch(_){}
+        try{
+            const old=this.loadData('settings');
+            if(old&&typeof old==='object'){
+                const next=Object.assign({},old);delete next.authToken;
+                this.saveData('settings',next);
+            }
+        }catch(_){}
+    }
+    async confirmOfficialHttpLogin() {
+        if(typeof UI.showDialog!=='function')throw Error('当前App无法显示登录传输确认，请更新App');
+        return await new Promise(resolve=>{
+            let done=false;
+            const finish=value=>{if(!done){done=true;resolve(value);}};
+            setTimeout(()=>finish(false),120000);
+            UI.showDialog('栗子官方账号登录',
+                '当前官方HTTPS连接不可用。继续会按官方App协议，通过HTTP向 ai.xajtl.com 提交邮箱和密码；HTTP不会加密传输。是否继续？\n\nJM账号不能用于栗子，请填写栗子官方邮箱账号。',[
+                {text:'取消',callback:()=>finish(false)},
+                {text:'继续官方登录',style:'filled',callback:()=>finish(true)},
+            ]);
+        });
+    }
+    async officialLoginOrigin() {
+        const secure='https://ai.xajtl.com';
+        try{
+            const r=await this.diagnosticTimeout(Network.get(secure+Lizimh.signedPath('/app/api/health'),Lizimh.apiHeaders()),6000);
+            if(r.status===200&&JSON.parse(r.body).status===true)return secure;
+        }catch(_){}
+        if(!await this.confirmOfficialHttpLogin())throw Error('已取消登录，未提交账号密码');
+        return 'http://ai.xajtl.com';
+    }
+    async loginOfficialAccount(account,password) {
+        if(this._loginBusy)throw Error('正在登录，请稍候');
+        // Official UI trims both fields and posts JSON email/pwd directly.
+        const trim=value=>String(value||'').replace(/^[\s\u0085]+|[\s\u0085]+$/g,'');
+        const email=trim(account),pwd=trim(password);
+        if(!email||!pwd)throw Error('请输入栗子官方邮箱和密码（不是JM账号）');
+        if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))throw Error('栗子官方登录使用邮箱，请填写完整邮箱地址');
+        this._loginBusy=true;const operation=++this._authEpoch;
+        try{
+            const origin=await this.officialLoginOrigin();
+            if(operation!==this._authEpoch)throw Error('登录状态已变化，请重新登录');
+            const response=await this.diagnosticTimeout(Network.sendRequest('POST',
+                origin+Lizimh.signedPath('/app/api/user/login'),
+                Lizimh.apiHeaders({'Content-Type':'application/json'}),
+                JSON.stringify({email,pwd}),
+                {maskDataInLog:true,maskHeadersInLog:['authorization','Authorization']}),15000);
+            if(operation!==this._authEpoch)throw Error('登录状态已变化，请重新登录');
+            if(!response||response.status!==200)throw Error('登录请求失败'+(response&&response.status?'（HTTP '+response.status+'）':''));
+            let json;try{json=JSON.parse(response.body);}catch(_){throw Error('登录接口未返回有效数据');}
+            const data=json&&json.data,token=data&&typeof data.token==='string'?this.normalizeOfficialToken(data.token):'';
+            // The host treats every non-throwing return as success. Require an
+            // actual non-empty token before resolving the native form.
+            if(!token||(typeof json.code==='number'&&(json.code<200||json.code>=300)))throw Error('登录未成功，请核对栗子邮箱和密码或账号状态');
+            if(operation!==this._authEpoch)throw Error('登录状态已变化，请重试');
+            this._officialCache={};
+            this.saveData('officialSession_v1',{token,legacy:false,createdAt:Date.now()});
+            this.deleteData('officialLogout_v1');
+            return true;
+        }catch(e){
+            // Never expose response bodies, email/password values or token.
+            const text=String(e&&e.message||'');
+            if(/^(已取消登录|登录状态已变化|登录未成功|登录接口未返回|登录请求失败)/.test(text))throw Error(text);
+            if(/(?:HTTP|status(?: code)?|Status Code)[:\s]+(?:400|401|403)\b/i.test(text))throw Error('登录未成功，请核对栗子邮箱和密码或账号状态');
+            if(/(?:HTTP|status(?: code)?|Status Code)[:\s]+429\b/i.test(text))throw Error('登录请求过于频繁，请稍后重试');
+            throw Error('登录连接失败，请检查网络后重试');
+        }finally{this._loginBusy=false;}
+    }
+    account={
+        login:async(account,password)=>await this.loginOfficialAccount(account,password),
+        logout:()=>this.clearOfficialSession(),
+        registerWebsite:null,
+    };
+
+    // Hidden controls retain valid internal defaults and any previously saved
+    // explicit binding; UI removal must not erase unrelated source data.
+
+    _readingModeByChapter = {};
+    _lastReadMode = null;
+    _lastImageRead = null;
+    _lastImageRecordSave = 0;
+    _modeTestBusy = false;
+
+    recordReadingMode(comicId,epId,chapterId,mode,images,detail) {
+        const row={comicId:String(comicId),epId:String(epId),chapterId:String(chapterId),
+            mode,detail:String(detail||''),pages:images.length,at:Date.now()};
+        this._readingModeByChapter[row.comicId+'@'+row.epId]=row;
+        this._lastReadMode=row;
+        try{this.saveData('lastReadingMode_v1',JSON.stringify(row));}catch(_){}
+    }
+
+    getLastReadingMode() {
+        if(this._lastReadMode)return this._lastReadMode;
+        try{
+            const r=JSON.parse(this.loadData('lastReadingMode_v1')||'null');
+            if(r&&typeof r==='object'&&r.at&&r.mode)return r;
+        }catch(_){}
+        return null;
+    }
+
+    imageReadSucceeded(url,body,decoded,context) {
+        const name=String(url).match(/^https?:\/\/([^/]+)/i);
+        const row={host:name?name[1]:'未知',at:Date.now(),
+            transformed:!LiziImageCodec.signature(LiziImageCodec.bytes(body)),
+            bytes:LiziImageCodec.bytes(decoded).length};
+        if(context){row.comicId=String(context.comicId||'');row.epId=String(context.epId||'');row.kind=String(context.kind||'image');}
+        this._lastImageRead=row;
+        // Persist at most once per five seconds, never once per page chunk.
+        // Do not persist full URLs, request headers, or account credentials.
+        if(row.at-this._lastImageRecordSave>=5000){
+            this._lastImageRecordSave=row.at;
+            try{this.saveData('lastImageRoute_v1',JSON.stringify(row));}catch(_){}
+        }
+    }
+
+    async showReadingModeTest() {
+        if(this._modeTestBusy){UI.showMessage('读取方式测试正在进行');return;}
+        this._modeTestBusy=true;
+        let message;
+        try{
+            const prior=this.getLastReadingMode();
+            const loginToken=this.getOfficialToken();
+            const lines=['账号状态：'+(loginToken?'已具备官方登录凭证':'未登录（匿名读取）')];
+            if(prior){
+                const age=Date.now()-prior.at;
+                lines.push('\n最近实际章节：'+prior.comicId+' / '+prior.epId,
+                    '图片清单来源：'+(prior.mode==='official'?'官方章节接口（官方顺序）':'公开CDN探测（文件名顺序）'),
+                    '清单取得方式：'+({network:'本次实际请求', 'memory-cache':'已取得的官方清单（内存）','persistent-cache':'已取得的官方清单（本地缓存）',anonymous:'无令牌公开探测','official-unavailable-public-fallback':'官方清单未取得，实际回退公开探测'}[prior.detail]||prior.detail),
+                    '最近清单页数：'+prior.pages,
+                    '记录时间：'+new Date(prior.at).toISOString());
+                if(age>30*60*1000)lines.push('以上为历史记录，不代表当前连接；下方重新测试当前章节。');
+                // Reuse the source cache; do not consume another authorized
+                // reading credit just for a settings diagnostic.
+                const cached=this._officialCache[prior.chapterId];
+                const cover=(this._coverById[prior.comicId]||{})[prior.chapterId];
+                let key=cached&&cached.length?this.abs(cached[0]):cover?this.abs(cover):null;
+                if(!key){
+                    try{
+                        const pics=JSON.parse(this.loadData('officialPics_enc1_'+prior.chapterId)||'null');
+                        if(Array.isArray(pics)&&pics.length)key=this.abs(pics[0]);
+                    }catch(_){}
+                }
+                if(!key)lines.push('\n当前图片测试：暂无本地章节路径，请先打开一章再测试。');
+                else{
+                    let cfg=this.imageLoadingConfig(key),result=null,lastError='';
+                    while(cfg){
+                        try{
+                            const started=Date.now();
+                            const r=await this.diagnosticTimeout(fetch(cfg.url,{headers:cfg.headers}),10000);
+                            if(r.status!==200)throw Error('HTTP '+r.status);
+                            const bytes=await this.diagnosticTimeout(r.arrayBuffer(),10000);
+                            const plain=LiziImageCodec.decode(bytes,cfg.url);
+                            const m=String(cfg.url).match(/^https?:\/\/([^/]+)/i);
+                            result={host:m?m[1]:'未知',bytes:plain.byteLength,ms:Date.now()-started,
+                                transformed:!LiziImageCodec.signature(new Uint8Array(bytes))};break;
+                        }catch(e){lastError=this.safeDiagnosticError(e);cfg=cfg.onLoadFailed?cfg.onLoadFailed():null;}
+                    }
+                    if(result)lines.push('\n实际图片CDN：'+result.host,
+                        '测试结果：可下载、编码校验通过（'+(result.bytes/1024).toFixed(1)+' KiB，'+result.ms+' ms）',
+                        '图片处理：'+(result.transformed?'官方v7字节还原':'标准明文图片原样读取'));
+                    else lines.push('\n当前图片测试：失败（'+lastError+'）');
+                }
+            }else lines.push('\n尚无实际阅读记录。请先打开任意一章，返回这里再测试；不会凭登录状态猜测当前读取方式。');
+            lines.push('\n说明：官方接口负责返回图片清单，图片文件仍由CDN传输；两者并非互斥。此测试不重新调用收费/计次章节接口。');
+            message=lines.join('\n');
+        }catch(e){message='读取方式测试失败：'+this.safeDiagnosticError(e);}
+        finally{this._modeTestBusy=false;}
+        this.showSourceDiagnostic('当前读取方式',message);
+    }
+
+    safeDiagnosticError(error) {
+        const text=String(error||'');
+        const http=text.match(/HTTP\s+\d{3}/i);
+        if(http)return http[0];
+        if(/timeout|超时|Timeout/i.test(text))return '连接超时';
+        if(/DNS|ENOTFOUND|resolve|lookup/i.test(text))return '域名解析失败';
+        if(/TLS|SSL|certificate/i.test(text))return '安全连接失败';
+        if(/image|encoding|WEBP|图像|图片|seed/i.test(text))return '图片内容或编码无效';
+        return '网络或响应失败';
+    }
+
+    showSourceDiagnostic(title,message) {
+        if(typeof UI.showDialog==='function')return UI.showDialog(title,message,[{text:'关闭',callback:()=>{}}]);
+        UI.showMessage(title+'\n'+message);
+    }
+
+    _officialManifestSource={};
+
     _diagnosticBusy = false;
 
     async diagnosticTimeout(task, ms) {
@@ -310,75 +460,145 @@ class Lizimh extends ComicSource {
         });
     }
 
-    async diagnosticApi(base) {
-        const start = Date.now();
-        const r = await this.diagnosticTimeout(
-            Network.get(base + Lizimh.signedPath("/app/api/v2/detail/57229"), Lizimh.apiHeaders()), 6000);
-        if (r.status !== 200) throw new Error("HTTP " + r.status);
-        const j = JSON.parse(r.body);
-        if (j.code !== 201 || !j.data || !Array.isArray(j.data.chapters)) {
-            throw new Error("非有效漫画接口响应");
+    _imageSpeedBusy=false;
+    _imageSpeedSummary=null;
+
+    async speedSamples() {
+        const samples=[];
+        const add=(label,path)=>{
+            path=this.officialImagePath(path);
+            if(!path)return;
+            const plain=path.startsWith('$jp$')?path.slice(4):path;
+            if(!plain.startsWith('/'))return;
+            if(!samples.some(s=>s.path===plain))samples.push({label,path:plain,marked:path.startsWith('$jp$')});
+        };
+        const last=this.getLastReadingMode();
+        if(last){
+            const pics=this._officialCache[last.chapterId];
+            if(pics&&pics.length)add('当前章节',pics[0]);
         }
-        return {ms: Date.now() - start, data: j.data};
+        // Two actual, stable files on the current service, not a CDN root.
+        // They are explicitly labelled sample resources, not bandwidth limits.
+        if(!samples.length)add('新资源样本','$jp$/101/62539/58958c1c5505bf45/fd7d13b4/1.webp');
+        if(!samples.some(s=>!s.marked))add('旧资源样本','/3/62539/3890284/66.jpg');
+        return samples.slice(0,2);
     }
 
-    async runDiagnosticTest(images) {
-        if (this._diagnosticBusy) { UI.showMessage("测速仍在进行，请稍候"); return; }
-        this._diagnosticBusy = true;
-        let message;
-        try {
-            UI.showMessage(images ? "正在准备同一张样本图片，各线路并行下载…" : "正在并行验证 API 节点…");
-            const bases = [Lizimh.api, Lizimh.apiFallback].filter((v,i,a) => a.indexOf(v) === i);
-            const api = await Promise.all(bases.map(async base => {
-                try { return {base, ok: true, ...await this.diagnosticApi(base)}; }
-                catch (e) { return {base, ok: false, error: String(e)}; }
-            }));
-            api.sort((a,b) => Number(b.ok)-Number(a.ok) || (a.ms||0)-(b.ms||0));
-            if (!images) {
-                const shortError = (error) => {
-                    const text = String(error || "");
-                    if (/ENOTFOUND|DNS|lookup address/i.test(text)) return "DNS 不可用";
-                    if (/timeout|超时/i.test(text)) return "连接超时";
-                    const http = text.match(/HTTP \d{3}/);
-                    return http ? http[0] : "连接失败";
-                };
-                message = api.map((r,i) => r.base + "\n" + (r.ok ? r.ms + "ms" + (i===0 ? " ★ 最快" : "") : shortError(r.error))).join("\n\n");
-            } else {
-                const available = api.find(r => r.ok);
-                if (!available) throw new Error("API 均不可用，无法取得测试图片；未执行图片测速");
-                const sample = available.data.chapters.find(c => typeof c.cover === "string" && /^\/(?!\/)/.test(c.cover));
-                if (!sample) throw new Error("没有可用的相对路径图片样本");
-                const results = await Promise.all(Lizimh.lines.map(async (line,i) => {
-                    const start = Date.now();
-                    try {
-                        const n = await this.diagnosticTimeout((async () => {
-                            const r = await fetch(this.lineAbs(sample.cover,i), {headers: {"User-Agent": "Mozilla/5.0", "Cache-Control": "no-cache"}});
-                            if (r.status !== 200) throw new Error("HTTP " + r.status);
-                            const bytes = new Uint8Array(await r.arrayBuffer());
-                            const jpg = bytes[0]===255 && bytes[1]===216;
-                            const png = bytes[0]===137 && bytes[1]===80 && bytes[2]===78 && bytes[3]===71;
-                            const webp = bytes[0]===82 && bytes[1]===73 && bytes[8]===87 && bytes[9]===69;
-                            if (bytes.length < 1024 || !(jpg || png || webp)) throw new Error("响应非有效测试图片");
-                            return bytes.length;
-                        })(), 8000);
-                        const ms = Math.max(1,Date.now()-start);
-                        return {i, name:line.name, ok:true, n, ms, rate:n*1000/ms};
-                    } catch (e) { return {i,name:line.name,ok:false,error:String(e)}; }
-                }));
-                results.sort((a,b) => Number(b.ok)-Number(a.ok) || (b.rate||0)-(a.rate||0));
-                message = results.map((r,k) => r.name + "\n" + (r.ok ? (r.rate/1024).toFixed(1) + " KB/s · " + r.ms + "ms · " + (r.n/1024).toFixed(1) + " KB" + (k===0 ? " ★ 最快" : "") : /timeout|超时/i.test(String(r.error)) ? "连接超时" : "连接失败")).join("\n\n");
-                message += "\n\n同一张图片的有效下载速度，含连接耗时；受缓存及并行竞争影响，不代表带宽上限。超时仅停止等待，宿主请求可能仍在完成。";
+    speedTargets(sample) {
+        const path=sample.path,targets=[];
+        const add=(name,url,index)=>{
+            if(!/^https?:\/\//.test(url)||targets.some(t=>t.url===url))return;
+            const host=(url.match(/^https?:\/\/([^/]+)/i)||[])[1]||'';
+            targets.push({name,host,url,index});
+        };
+        add('官方新图CDN',Lizimh.jpPublic+path,null);
+        for(let i=0;i<Lizimh.lines.length;i++){
+            const line=Lizimh.lines[i];
+            // Proxies do not expose their underlying cached object. Report
+            // them separately, never mistake them for a direct CDN.
+            const url=line.proxy&&line.src?line.url+encodeURIComponent(line.src+path):line.url+path;
+            add(line.name+(line.proxy?'（代理）':''),url,i);
+        }
+        add('旧图CDN','https://media.imgo.buzz'+path,null);
+        return targets;
+    }
+
+    async measureImageTarget(target,timeoutMs) {
+        const started=Date.now();
+        try{
+            return await this.diagnosticTimeout((async()=>{
+                const response=await fetch(target.url,{headers:{'User-Agent':'Mozilla/5.0','Cache-Control':'no-cache'}});
+                const firstResponse=Date.now()-started;
+                if(response.status!==200)throw Error('HTTP '+response.status);
+                const bytes=await response.arrayBuffer();
+                const elapsed=Math.max(1,Date.now()-started);
+                const n=LiziImageCodec.bytes(bytes).length;
+                if(n>2*1024*1024)throw Error('测速样本过大');
+                const decodeStarted=Date.now(),plain=LiziImageCodec.decode(bytes,target.url);
+                return {ok:true,n,ms:elapsed,responseMs:firstResponse,decodeMs:Date.now()-decodeStarted,
+                    rate:n*1000/elapsed,transformed:!LiziImageCodec.signature(LiziImageCodec.bytes(bytes)),
+                    decodedBytes:plain.byteLength};
+            })(),timeoutMs);
+        }catch(e){return {ok:false,error:this.safeDiagnosticError(e),ms:Date.now()-started};}
+    }
+
+    async runImageSpeedTest() {
+        if(this._imageSpeedBusy){UI.showMessage('图片测速仍在进行，请稍候');return;}
+        this._imageSpeedBusy=true;
+        let text;
+        try{
+            UI.showMessage('使用真实图片分组测速；串行下载两轮，避免并行抢带宽…');
+            const samples=await this.speedSamples(),groups=[];
+            let transferred=0,attempted=0;
+            const started=Date.now();
+            for(const sample of samples){
+                const rows=[];
+                for(const target of this.speedTargets(sample)){
+                    if(Date.now()-started>60000||transferred>8*1024*1024){
+                        rows.push({...target,ok:false,error:'达到测速时间或流量上限'});continue;
+                    }
+                    const runs=[];
+                    for(let round=0;round<2;round++){
+                        const remaining=60000-(Date.now()-started);
+                        if(remaining<=0||transferred>=8*1024*1024){runs.push({ok:false,error:'达到测速时间或流量上限'});break;}
+                        const result=await this.measureImageTarget(target,Math.min(5000,remaining));
+                        attempted++;if(result.n)transferred+=result.n;runs.push(result);
+                        if(!result.ok)break;
+                    }
+                    const valid=runs.filter(r=>r.ok),latest=valid[valid.length-1];
+                    const totalBytes=valid.reduce((n,r)=>n+r.n,0),totalMs=valid.reduce((n,r)=>n+r.ms,0);
+                    const rate=totalMs>0?totalBytes*1000/totalMs:0;
+                    rows.push({...target,ok:valid.length===2,partial:valid.length===1,runs,rate,
+                        n:latest?totalBytes/valid.length:undefined,ms:latest?Math.round(totalMs/valid.length):undefined,
+                        responseMs:latest?Math.round(valid.reduce((n,r)=>n+r.responseMs,0)/valid.length):undefined,
+                        decodeMs:latest?Math.round(valid.reduce((n,r)=>n+r.decodeMs,0)/valid.length):undefined,
+                        error:!latest?(runs[0]&&runs[0].error):null});
+                }
+                rows.sort((a,b)=>Number(b.ok)-Number(a.ok)||b.rate-a.rate);
+                groups.push({sample,rows});
             }
-            message += "\n\n仅报告结果，不自动切换线路。";
-        } catch (e) { message = "测速失败：" + String(e); }
-        finally { this._diagnosticBusy = false; }
-        const title = images ? "图片下载测速" : "API 节点延迟";
-        if (typeof UI.showDialog === "function") {
-            UI.showDialog(title, message, [
-                {text: "关闭", callback: () => {}},
-                {text: "重新测试", callback: () => this.runDiagnosticTest(images)},
-            ]);
-        } else { UI.showMessage(message); }
+            const report=[];
+            for(const group of groups){
+                report.push('【'+group.sample.label+' · 同一文件】');
+                let star=false;
+                for(const row of group.rows){
+                    const good=row.ok||row.partial;
+                    let result=good?(row.rate/1024).toFixed(1)+' KiB/s（含连接时间）\n  平均单图 '+(row.n/1024).toFixed(1)+' KiB · 完成 '+row.ms+' ms · 响应 '+row.responseMs+' ms · 还原校验 '+row.decodeMs+' ms':row.error||'连接失败';
+                    if(good){result+=' · '+(row.ok?'2/2通过':'仅1/2通过');if(!star&&row.ok){star=true;result+=' ★ 本组最快';}}
+                    report.push(row.name+' · '+row.host+'\n  '+result);
+                }
+                report.push('');
+            }
+            this._imageSpeedSummary={at:Date.now(),groups,transferred,attempted};
+            // Persist sanitized ranking only; never cache sample URLs or tokens.
+            const ranked=groups.find(g=>g.sample.marked===false);
+            if(ranked){
+                const order=ranked.rows.filter(r=>r.ok&&r.index!=null).map(r=>r.index);
+                if(order.length){this._lineOrder=order;try{this.saveData('imageSpeedRanking_v2',JSON.stringify({at:Date.now(),order,lines:Lizimh.lines.map(l=>[l.url,l.src||'',!!l.proxy])}));}catch(_){}}
+            }
+            report.push('本次总流量：'+(transferred/1024).toFixed(1)+' KiB；'+attempted+' 次实际请求。',
+                '只把HTTP200且能通过图片/v7编码校验的响应计入速度；400、404、HTML错误页不算健康。',
+                '新旧资源分组比较，不跨组排行；按实际URL去重后各测两轮。小图片、缓存、连接建立会影响结果，不代表宽带峰值。',
+                '“响应”是宿主fetch返回时间；宿主可能已缓冲响应体，不冒充精确首字节TTFB。',
+                '仅更新自动选择的有效排序；不改手动线路选择。宿主超时后无法强制取消已发请求。');
+            text=report.join('\n');
+        }catch(e){text='图片测速失败：'+this.safeDiagnosticError(e);}
+        finally{this._imageSpeedBusy=false;}
+        this.showSourceDiagnostic('图片下载测速',text);
+    }
+
+    async speedTest() {
+        // Startup must not rank CDN roots: many return 400/404 intentionally.
+        // Reuse only recently validated real-image results. Manual measurement
+        // performs actual bodies/decoding; all other routes retain safe order.
+        try{
+            const cached=JSON.parse(this.loadData('imageSpeedRanking_v2')||'null');
+            if(cached&&Date.now()-cached.at<60*60*1000&&Array.isArray(cached.order)&&
+                JSON.stringify(cached.lines)===JSON.stringify(Lizimh.lines.map(l=>[l.url,l.src||'',!!l.proxy]))){
+                const good=cached.order.filter(i=>Number.isInteger(i)&&i>=0&&i<Lizimh.lines.length);
+                if(good.length)this._lineOrder=good;
+            }
+        }catch(_){}
     }
 
     // 當前使用哪條線 (auto 時用測速結果第一條)
@@ -469,7 +689,7 @@ class Lizimh extends ComicSource {
         this._imageRouteFlights[dir]=task;
         try{await task;}finally{delete this._imageRouteFlights[dir];}
     }
-    imageLoadingConfig(value) {
+    imageLoadingConfig(value,context) {
         const path=this.officialImagePath(this.imageNetworkKey(value));
         const candidates=[this.lineAbs(path)];
         if(path.startsWith('$jp$')) {
@@ -484,7 +704,7 @@ class Lizimh extends ComicSource {
         const next=()=>{
             if(index>=urls.length)return undefined;
             const url=urls[index++];
-            return {url,headers:{'User-Agent':'Mozilla/5.0'},onResponse:body=>LiziImageCodec.decode(body,url),onLoadFailed:next};
+            return {url,headers:{'User-Agent':'Mozilla/5.0'},onResponse:body=>{const decoded=LiziImageCodec.decode(body,url);this.imageReadSucceeded(url,body,decoded,context);return decoded;},onLoadFailed:next};
         };
         return next();
     }
@@ -552,62 +772,6 @@ class Lizimh extends ComicSource {
     }
 
 
-    // 測速: 對每條線發一次 HEAD, 按延遲排序 (auto 模式使用)
-    async speedTest() {
-        // 只對直連線路測速（代理型線路單獨排到最後，避免探測繞代理而變慢）
-        let direct = [], proxy = [];
-        for (let i = 0; i < Lizimh.lines.length; i++) {
-            (Lizimh.lines[i].proxy ? proxy : direct).push(i);
-        }
-        if (direct.length) {
-            // v2.30.1：改成【並行】測速 + 短超時（原本逐條等 2.5 秒，
-            // 有斷線線路時光是測速就要好幾秒 → 使用者感覺「載入慢成狗」）
-            let measured = await Promise.all(direct.map(async (i) => {
-                let t0 = Date.now();
-                let ok = false;
-                try {
-                    let res = await Promise.race([
-                        Network.sendRequest("HEAD", Lizimh.lines[i].url + "/", {}),
-                        this.sleep(800).then(() => null),
-                    ]);
-                    ok = res && res.status && res.status < 500;
-                } catch (e) { ok = false; }
-                let dt = Date.now() - t0;
-                return { i: i, ms: ok ? dt : 999999 };
-            }));
-            measured.sort((a, b) => a.ms - b.ms);
-            this._lineMs = {};
-            for (let m of measured) this._lineMs[m.i] = m.ms;
-            this._lineOrder = measured.map((r) => r.i).concat(proxy);
-            let best = Lizimh.lines[this._lineOrder[0]];
-            console.log("[lizimh] 线路测速(仅直连): " + measured.map((r) =>
-                Lizimh.lines[r.i].name + "=" + (r.ms > 900000 ? "超时" : r.ms + "ms")).join(", ")
-                + " → 选用 " + best.name);
-            return;
-        }
-        let results = [];
-        for (let i = 0; i < Lizimh.lines.length; i++) {
-            let t0 = Date.now();
-            let ok = false;
-            try {
-                let res = await Promise.race([
-                    Network.sendRequest("HEAD", Lizimh.lines[i].url + "/", {}),
-                    this.sleep(2500).then(() => null),
-                ]);
-                ok = res && res.status && res.status < 500;
-            } catch (e) { ok = false; }
-            let dt = Date.now() - t0;
-            results.push({ i: i, ms: ok ? dt : 999999 });
-            await this.sleep(60);
-        }
-        results.sort((a, b) => a.ms - b.ms);
-        this._lineOrder = results.map((r) => r.i);
-        let best = Lizimh.lines[this._lineOrder[0]];
-        console.log("[lizimh] 线路测速: " + results.map((r) =>
-            Lizimh.lines[r.i].name + "=" + (r.ms > 900000 ? "超时" : r.ms + "ms")).join(", ")
-            + " → 选用 " + best.name);
-    }
-
     // 圖片加載失敗時, 換下一條線重試同一張圖
     nextLineUrl(url) {
         let path = this._imgPath[url];
@@ -663,7 +827,7 @@ class Lizimh extends ComicSource {
             return JSON.stringify({ code: 201, data: await Lizimh.getJson(path) });
         }
         let token = "";
-        try { token = String(this.loadSetting("authToken") || "").trim(); } catch (e) {}
+        try { token = this.getOfficialToken(); } catch (e) {}
         token = token.replace(/^jwt:\s*/i, "").replace(/^Bearer\s+/i, "").trim();
         // Writes always try the primary host first; the fallback host's DNS
         // has been dead, and a stale _useFallback flag used to send every POST
@@ -988,15 +1152,17 @@ class Lizimh extends ComicSource {
     async officialPics(chapterId) {
         if (!/^\d+$/.test(String(chapterId || ''))) return null;
         let token='';
-        try { token=String(this.loadSetting('authToken') || '').trim(); } catch (_) {}
+        try { token=this.getOfficialToken(); } catch (_) {}
         token = token.replace(/^jwt:\s*/i, "").replace(/^Bearer\s+/i, "").trim();
         if (!token) return null;
         const id=String(chapterId),key='officialPics_enc1_'+id;
-        if (this._officialCache[id]) return this.officialImageUrls(this._officialCache[id]);
+        const authEpoch=this._authEpoch;
+        if (this._officialCache[id]) {this._officialManifestSource[id]='memory-cache';return this.officialImageUrls(this._officialCache[id]);}
         try {
             const saved=JSON.parse(this.loadData(key)||'null');
             if(Array.isArray(saved)&&saved.length&&saved.every(x=>typeof x==='string')) {
                 this._officialCache[id]=saved;
+                this._officialManifestSource[id]='persistent-cache';
                 return this.officialImageUrls(saved);
             }
         } catch (_) {}
@@ -1008,10 +1174,12 @@ class Lizimh extends ComicSource {
                     base+Lizimh.signedPath('/app/api/chapter/v3/'+id),
                     Lizimh.apiHeaders({authorization:token})),15000);
                 if(r.status!==200) continue;
+                if(authEpoch!==this._authEpoch)return null;
                 const j=JSON.parse(r.body),pics=j&&j.data&&j.data.pics;
                 if(j.code!==201||!Array.isArray(pics)||!pics.length||!pics.every(x=>typeof x==='string')) continue;
                 const paths=pics.map(x=>this.officialImagePath(x));
                 this._officialCache[id]=paths;
+                this._officialManifestSource[id]='network';
                 try { this.saveData(key,JSON.stringify(paths)); } catch (_) {}
                 return this.officialImageUrls(paths);
             } catch (_) {}
@@ -1478,6 +1646,7 @@ class Lizimh extends ComicSource {
             try {
                 const official = await this.officialPics(chId);
                 if (official && official.length) {
+                    this.recordReadingMode(comicId,epId,chId,'official',official,this._officialManifestSource[String(chId)]||'official');
                     try { this.warmNext(comicId, epId); } catch (e) {}
                     return { images: official };
                 }
@@ -1503,10 +1672,12 @@ class Lizimh extends ComicSource {
                 this._imgLine[u] = line;
                 this._imgPath[u] = this.officialImagePath(u);
             }
-            return { images: images.map(u => this.imageCacheKey(u)) };
+            const output=images.map(u => this.imageCacheKey(u));
+            this.recordReadingMode(comicId,epId,chId,'public',output,this.getOfficialToken()?'official-unavailable-public-fallback':'anonymous');
+            return { images: output };
         },
 
-        onImageLoad: (url, comicId, epId) => this.imageLoadingConfig(url),
+        onImageLoad: (url, comicId, epId) => this.imageLoadingConfig(url,{comicId,epId,kind:'reader'}),
         onThumbnailLoad: (url) => this.thumbnailLoadingConfig(url),
     };
 }
