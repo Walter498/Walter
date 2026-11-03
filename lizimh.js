@@ -11,7 +11,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.33.33";
+    version = "2.33.34";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -257,26 +257,9 @@ class Lizimh extends ComicSource {
             }
         }catch(_){}
     }
-    async confirmOfficialHttpLogin() {
-        if(typeof UI.showDialog!=='function')throw Error('当前App无法显示登录传输确认，请更新App');
-        return await new Promise(resolve=>{
-            let done=false;
-            const finish=value=>{if(!done){done=true;resolve(value);}};
-            setTimeout(()=>finish(false),120000);
-            UI.showDialog('栗子官方账号登录',
-                '当前官方HTTPS连接不可用。继续会按官方App协议，通过HTTP向 ai.xajtl.com 提交邮箱和密码；HTTP不会加密传输。是否继续？\n\nJM账号不能用于栗子，请填写栗子官方邮箱账号。',[
-                {text:'取消',callback:()=>finish(false)},
-                {text:'继续官方登录',style:'filled',callback:()=>finish(true)},
-            ]);
-        });
-    }
     async officialLoginOrigin() {
-        const secure='https://ai.xajtl.com';
-        try{
-            const r=await this.diagnosticTimeout(Network.get(secure+Lizimh.signedPath('/app/api/health'),Lizimh.apiHeaders()),6000);
-            if(r.status===200&&JSON.parse(r.body).status===true)return secure;
-        }catch(_){}
-        if(!await this.confirmOfficialHttpLogin())throw Error('已取消登录，未提交账号密码');
+        // Direct official login transport, as requested by the account owner.
+        // No preliminary health probe or additional confirmation dialog.
         return 'http://ai.xajtl.com';
     }
     async loginOfficialAccount(account,password) {
