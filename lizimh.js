@@ -11,7 +11,7 @@
 class Lizimh extends ComicSource {
     name = "栗子漫画";
     key = "lizimh";
-    version = "2.33.34";
+    version = "2.33.36";
     minAppVersion = "1.2.2";
     url = "https://raw.githubusercontent.com/Walter498/Walter/main/lizimh.js";
 
@@ -258,11 +258,11 @@ class Lizimh extends ComicSource {
         }catch(_){}
     }
     async officialLoginOrigin() {
-        // Direct official login transport, as requested by the account owner.
-        // No preliminary health probe or additional confirmation dialog.
-        return 'http://ai.xajtl.com';
+        // Direct official login transport. Endpoint discovery happens only if
+        // this real request fails, never as a pre-login health round trip.
+        return Lizimh.api;
     }
-    async loginOfficialAccount(account,password) {
+    async loginOfficialAccount(account,password,retried) {
         if(this._loginBusy)throw Error('正在登录，请稍候');
         // Official UI trims both fields and posts JSON email/pwd directly.
         const trim=value=>String(value||'').replace(/^[\s\u0085]+|[\s\u0085]+$/g,'');
@@ -279,7 +279,10 @@ class Lizimh extends ComicSource {
                 JSON.stringify({email,pwd}),
                 {maskDataInLog:true,maskHeadersInLog:['authorization','Authorization']}),15000);
             if(operation!==this._authEpoch)throw Error('登录状态已变化，请重新登录');
-            if(!response||response.status!==200)throw Error('登录请求失败'+(response&&response.status?'（HTTP '+response.status+'）':''));
+            if(!response||!response.status)throw Error('登录连接失败');
+            if(response.status===400||response.status===401||response.status===403)throw Error('登录未成功，请核对栗子邮箱和密码或账号状态');
+            if(response.status===429)throw Error('登录请求过于频繁，请稍后重试');
+            if(response.status!==200)throw Error('登录请求失败（HTTP '+response.status+'）');
             let json;try{json=JSON.parse(response.body);}catch(_){throw Error('登录接口未返回有效数据');}
             const data=json&&json.data,token=data&&typeof data.token==='string'?this.normalizeOfficialToken(data.token):'';
             // The host treats every non-throwing return as success. Require an
@@ -293,9 +296,14 @@ class Lizimh extends ComicSource {
         }catch(e){
             // Never expose response bodies, email/password values or token.
             const text=String(e&&e.message||'');
-            if(/^(已取消登录|登录状态已变化|登录未成功|登录接口未返回|登录请求失败)/.test(text))throw Error(text);
+            if(typeof console!=='undefined'&&console.log)            if(/^(已取消登录|登录状态已变化|登录未成功|登录接口未返回|登录请求失败)/.test(text))throw Error(text);
             if(/(?:HTTP|status(?: code)?|Status Code)[:\s]+(?:400|401|403)\b/i.test(text))throw Error('登录未成功，请核对栗子邮箱和密码或账号状态');
             if(/(?:HTTP|status(?: code)?|Status Code)[:\s]+429\b/i.test(text))throw Error('登录请求过于频繁，请稍后重试');
+            if(!retried&&/登录连接失败|连接|网络|超时|DNS|resolve|lookup|Incomplete|Empty|refused|fetch failed|ECONN|socket|closed/i.test(text)){
+                this._loginBusy=false;
+                await Lizimh.ensureApi(true);
+                return await this.loginOfficialAccount(account,password,true);
+            }
             throw Error('登录连接失败，请检查网络后重试');
         }finally{this._loginBusy=false;}
     }
@@ -505,6 +513,129 @@ class Lizimh extends ComicSource {
         }catch(e){return {ok:false,error:this.safeDiagnosticError(e),ms:Date.now()-started};}
     }
 
+    formatImageSpeedSummary(summary) {
+        const groups=summary&&Array.isArray(summary.groups)?summary.groups:[];
+        const clean=(v)=>String(v==null?'':v).replace(/https?:\/\/\S+/gi,'地址已隐藏').split(/[?#]/)[0]
+            .replace(/[\u0000-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g,'').trim();
+        const short=(v)=>{const a=Array.from(clean(v)||'未命名');const n=/[\u4e00-\u9fff]/.test(a.join(''))?8:16;
+            return a.slice(0,n).join('')+(a.length>n?'…':'');};
+        const valid=(v)=>typeof v==='number'&&Number.isFinite(v)&&v>=0;
+        const dec=(v)=>v.toFixed(1).replace(/\.0$/,'');
+        const rate=(v)=>!valid(v)?'暂无':v>=1048576?dec(v/1048576)+' MiB/s':dec(v/1024)+' KiB/s';
+        const time=(v)=>!valid(v)?'暂无':v>=1000?dec(v/1000)+' 秒':Math.round(v)+' ms';
+        const state=(r)=>{const runs=Array.isArray(r.runs)?r.runs:[];
+            if(r.ok===true&&r.partial!==true&&runs.length===2&&runs.every(x=>x&&x.ok===true))return 'full';
+            if(r.partial===true||runs.some(x=>x&&x.ok===true))return 'partial';
+            return r.ok===false?'failed':'unknown';};
+        const reason=(r)=>{const t=String(r.error||((Array.isArray(r.runs)?r.runs:[]).find(x=>x&&x.ok!==true&&x.error)||{}).error||'');
+            if(/上限|预算|样本过大/.test(t))return '达到测试上限';
+            if(/timeout|超时/i.test(t))return '超时';
+            if(/DNS|ENOTFOUND|resolve|lookup|解析/i.test(t))return '域名解析失败';
+            if(/TLS|SSL|certificate|安全连接/i.test(t))return '安全连接失败';
+            const h=t.match(/HTTP\s*(\d{3})/i);if(h)return 'HTTP '+h[1];
+            if(/image|encoding|WEBP|图像|图片|编码|seed/i.test(t))return '图片校验失败';
+            return '网络失败';};
+        if(!groups.length)return '暂无测速结果，请重测。';
+        const out=[];
+        groups.forEach((g,gi)=>{
+            const sample=g&&g.sample||{};
+            const title=sample.marked===true?'新资源':sample.marked===false?'旧资源':'资源';
+            const rows=(g&&Array.isArray(g.rows)?g.rows:[]).map((r,i)=>({r:r||{},id:String(i+1),s:state(r||{})}));
+            out.push(title+(groups.length>1?' '+String.fromCharCode(65+gi):''));
+            if(!rows.length){out.push('  暂无结果','');return;}
+            const full=rows.filter(x=>x.s==='full'),best=full.find(x=>valid(x.r.rate)&&x.r.rate>0);
+            out.push('推荐  '+(best?short(best.r.name):'暂无稳定线路'));
+            if(full.length){out.push('可用');full.forEach(x=>out.push('  '+x.id+'. '+short(x.r.name)+'  '+rate(x.r.rate)+' · '+time(x.r.ms)));}
+            const partial=rows.filter(x=>x.s==='partial');
+            if(partial.length){out.push('未完成两次');partial.forEach(x=>out.push('  '+x.id+'. '+short(x.r.name)+'  仅1次通过'));}
+            const bad=rows.filter(x=>x.s==='failed'||x.s==='unknown');
+            if(bad.length){out.push('不可用');bad.forEach(x=>out.push('  '+x.id+'. '+short(x.r.name)+'  '+(x.s==='unknown'?'未知':reason(x.r))));}
+            out.push('');
+        });
+        out.push('新／旧资源分别比较。','详情含域名、采样与耗时。');
+        return out.join('\n');
+    }
+
+    formatImageSpeedDetails(summary) {
+        const groups=summary&&Array.isArray(summary.groups)?summary.groups:[];
+        const clean=(v)=>String(v==null?'':v).replace(/https?:\/\/\S+/gi,'地址已隐藏').split(/[?#]/)[0].replace(/[\u0000-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g,'').trim();
+        const wrap=(v)=>{const chars=Array.from(v);const a=[];for(let i=0;i<chars.length;i+=20)a.push(chars.slice(i,i+20).join(''));return a.join('\n');};
+        const valid=(v)=>typeof v==='number'&&Number.isFinite(v)&&v>=0;
+        const decimal=(v)=>v.toFixed(1).replace(/\.0$/,'');
+        const time=(v)=>valid(v)?(v>=1000?decimal(v/1000)+' 秒':Math.round(v)+' 毫秒'):'暂无';
+        const bytes=(v)=>valid(v)?(v>=1048576?decimal(v/1048576)+' 兆字节':decimal(v/1024)+' 千字节'):'暂无';
+        const host=(v)=>{
+            let s=String(v==null?'':v).trim().replace(/^https?:\/\//i,'').split(/[/?#]/)[0];
+            s=s.slice(s.lastIndexOf('@')+1);
+            return /^(?:[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?|\[[a-f0-9:]+\])(?::\d{1,5})?$/i.test(s)?s:'未记录或已隐藏';
+        };
+        const reason=(value)=>{
+            const t=String(value||'');
+            if(/上限|预算|样本过大/.test(t))return '达到测试上限';
+            if(/timeout|超时/i.test(t))return '连接超时';
+            if(/DNS|ENOTFOUND|resolve|lookup|解析/i.test(t))return '域名解析失败';
+            if(/TLS|SSL|certificate|安全连接/i.test(t))return '安全连接失败';
+            const m=t.match(/HTTP\s*(\d{3})/i);
+            if(m)return '响应状态 '+m[1];
+            if(/image|encoding|WEBP|图像|图片|编码|seed/i.test(t))return '图片校验失败';
+            return '网络或响应失败';
+        };
+        const count=(v)=>valid(v)&&Number.isInteger(v)?String(v):'未记录';
+        const out=['测试记录'];
+        const date=new Date(summary&&typeof summary.at==='number'?summary.at:NaN);
+        if(Number.isFinite(date.getTime())){
+            const pad=(v)=>String(v).padStart(2,'0');
+            out.push('时间：'+date.getFullYear()+'年'+(date.getMonth()+1)+'月'+date.getDate()+'日',pad(date.getHours())+':'+pad(date.getMinutes())+':'+pad(date.getSeconds())+'（本地时间）');
+        }
+        out.push('累计流量：'+bytes(summary&&summary.transferred),'实际请求：'+count(summary&&summary.attempted)+' 次','');
+        if(!groups.length)out.push('暂无分组结果。');
+        groups.forEach((g,gi)=>{
+            const sample=g&&g.sample||{};
+            out.push((sample.marked===true?'新资源':sample.marked===false?'旧资源':'资源类型未确认')+' · 第'+(gi+1)+'组');
+            out.push('样本：'+wrap(Array.from(clean(sample.label)||'未命名样本').slice(0,80).join('')));
+            const rows=g&&Array.isArray(g.rows)?g.rows:[];
+            if(!rows.length)out.push('本组暂无线路结果。');
+            rows.forEach((row,i)=>{
+                const r=row||{},runs=Array.isArray(r.runs)?r.runs:[];
+                const full=r.ok===true&&r.partial!==true&&runs.length===2&&runs.every(x=>x&&x.ok===true);
+                const passed=runs.filter(x=>x&&x.ok===true).length;
+                out.push('线路'+(i+1),'原名：'+wrap(Array.from(clean(r.name)||'未命名线路').slice(0,120).join('')),'域名：'+wrap(host(r.host)));
+                out.push('状态：'+(full?'两次通过':r.partial===true||passed?'未全通畅':r.ok===false?'失败':'状态未确认'));
+                out.push('采样：'+passed+' 次通过 / '+runs.length+' 次记录','平均单图：'+bytes(r.n),'平均完成：'+time(r.ms),'平均宿主响应：'+time(r.responseMs),'平均解码校验：'+time(r.decodeMs));
+                runs.forEach((run,ri)=>{
+                    const x=run||{};
+                    out.push('第'+(ri+1)+'次：'+(x.ok===true?'通过':x.ok===false?'失败':'状态未确认'));
+                    if(x.ok===true)out.push('流量：'+bytes(x.n),'完成：'+time(x.ms),'宿主响应：'+time(x.responseMs),'解码校验：'+time(x.decodeMs));
+                    else if(x.ok===false)out.push('原因：'+reason(x.error));
+                });
+                if(r.ok===false&&!runs.length)out.push('原因：'+reason(r.error));
+                out.push('');
+            });
+        });
+        out.push('统计口径','每条线路计划采样两次。','仅一次通过或状态未知，不算全通畅。','速度按有效下载总字节除以总耗时。','完成耗时含连接与下载，不含解码。','仅成功响应且图片校验通过计入速度。','宿主响应是调用返回耗时，','不等同精确首字节时间。','缓存及小图片可能影响测速结果。','新旧资源只在各自组内比较。','不展示图片路径、完整地址或查询参数。','沿用原测速排序，不改手动选择。','宿主超时后可能无法取消已发请求。');
+        return out.join('\n');
+    }
+
+    showImageSpeedResult(summary) {
+        // Snapshot reference only: formatting never mutates or persists results.
+        const result=summary||this._imageSpeedSummary;
+        const retry=()=>this.runImageSpeedTest();
+        const dialog=(title,text,actions)=>{
+            if(typeof UI.showDialog==='function')return UI.showDialog(title,text,actions);
+            return UI.showMessage(title+'\n'+text);
+        };
+        const main=()=>dialog('图片测速结果',this.formatImageSpeedSummary(result),[
+            {text:'查看详情',callback:details},
+            {text:'返回',callback:()=>{}},
+            {text:'重测',callback:retry}
+        ]);
+        const details=()=>dialog('测速详情',this.formatImageSpeedDetails(result),[
+            {text:'返回',callback:main},
+            {text:'重测',callback:retry}
+        ]);
+        return main();
+    }
+
     async runImageSpeedTest() {
         if(this._imageSpeedBusy){UI.showMessage('图片测速仍在进行，请稍候');return;}
         this._imageSpeedBusy=true;
@@ -567,6 +698,8 @@ class Lizimh extends ComicSource {
             text=report.join('\n');
         }catch(e){text='图片测速失败：'+this.safeDiagnosticError(e);}
         finally{this._imageSpeedBusy=false;}
+        this.showImageSpeedResult(this._imageSpeedSummary);
+        return;
         this.showSourceDiagnostic('图片下载测速',text);
     }
 
@@ -876,10 +1009,116 @@ class Lizimh extends ComicSource {
         throw new Error(last);
     };
 
-    static async getJson(path) {
-        const bases = Lizimh._useFallback
-            ? [Lizimh.apiFallback, Lizimh.api]
-            : [Lizimh.api, Lizimh.apiFallback];
+    // Official 1.1.7: encrypted TXT records select the live API origin.
+    // This stores endpoints in memory only; never cache or replay API content.
+    static _apiFlight = null;
+    static _apiReadyAt = 0;
+    static _apiEpoch = 0;
+    static _validApiOrigins = [];
+    static apiTimeout(task, ms) {
+        return new Promise((resolve,reject)=>{
+            let settled=false;
+            setTimeout(()=>{if(!settled){settled=true;reject(Error('API连接超时'));}},ms);
+            Promise.resolve(task).then(v=>{if(!settled){settled=true;resolve(v);}},
+                e=>{if(!settled){settled=true;reject(e);}});
+        });
+    }
+    static parseApiOrigin(value) {
+        const text=String(value||'').trim();
+        // Configuration must be an origin, not a credential-bearing URL,
+        // local IP, path, fragment, or redirect supplied by a business body.
+        if(!/^https?:\/\/[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z]{2,}(?::[0-9]{1,5})?\/?$/i.test(text))throw Error('官方API配置无效');
+        return text.replace(/\/$/,'');
+    }
+    static decodeApiBootstrap(value) {
+        const encoded=String(value||'').replace(/["'\s]/g,'');
+        if(!encoded||encoded.length>8192||!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded))throw Error('官方引导格式错误');
+        const result=Convert.decryptAesEcb(Convert.decodeBase64(encoded),
+            Convert.encodeUtf8('f8d992c74b29491d8a3e3fd5f07389d8'));
+        if(result==null)throw Error('官方引导解封失败');
+        const bytes=new Uint8Array(result);
+        if(!bytes.length||bytes.length%16)throw Error('官方引导长度错误');
+        const pad=bytes[bytes.length-1];
+        if(pad<1||pad>16||pad>bytes.length)throw Error('官方引导填充错误');
+        for(let i=bytes.length-pad;i<bytes.length;i++)if(bytes[i]!==pad)throw Error('官方引导填充错误');
+        return Convert.decodeUtf8(bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.length-pad));
+    }
+    static apiBases() {
+        const values=Lizimh._useFallback?[Lizimh.apiFallback,Lizimh.api]:[Lizimh.api,Lizimh.apiFallback];
+        return values.concat(Lizimh._validApiOrigins).filter((v,i,a)=>v&&a.indexOf(v)===i);
+    }
+    static async ensureApi(force) {
+        if(Lizimh._apiFlight)return await Lizimh._apiFlight;
+        if(!force&&Lizimh._apiReadyAt&&Date.now()-Lizimh._apiReadyAt<600000)return Lizimh._useFallback?Lizimh.apiFallback:Lizimh.api;
+        const epoch=++Lizimh._apiEpoch,healthy=[],healthFlights={};
+        const health=origin=>{
+            origin=Lizimh.parseApiOrigin(origin);
+            if(healthFlights[origin])return healthFlights[origin];
+            healthFlights[origin]=(async()=>{
+                const r=await Lizimh.apiTimeout(Network.get(origin+Lizimh.signedPath('/app/api/health'),Lizimh.apiHeaders()),4500);
+                if(!r||r.status!==200||JSON.parse(r.body).status!==true)throw Error('官方API健康检查失败');
+                if(epoch===Lizimh._apiEpoch){
+                    if(healthy.indexOf(origin)<0)healthy.push(origin);
+                    if(Lizimh._validApiOrigins.indexOf(origin)<0)Lizimh._validApiOrigins.push(origin);
+                    if(healthy.length>1)Lizimh.apiFallback=healthy.find(x=>x!==Lizimh.api)||Lizimh.apiFallback;
+                }
+                return origin;
+            })();
+            return healthFlights[origin];
+        };
+        const txt=async(resolver,domain)=>{
+            const r=await Lizimh.apiTimeout(Network.get('https://'+resolver+'/resolve?name='+encodeURIComponent(domain)+'&type=txt',Lizimh.apiHeaders()),4500);
+            if(!r||r.status!==200)throw Error('官方TXT查询失败');
+            const j=JSON.parse(r.body);
+            if(j.Status!==0||!Array.isArray(j.Answer))throw Error('官方TXT记录不可用');
+            for(const row of j.Answer){
+                if(row.type!==16||typeof row.data!=='string')continue;
+                try{return await health(Lizimh.decodeApiBootstrap(row.data));}catch(_){}
+            }
+            throw Error('官方TXT没有可用入口');
+        };
+        const first=tasks=>new Promise((resolve,reject)=>{
+            let remaining=tasks.length,done=false;
+            if(!remaining){reject(Error('无官方引导候选'));return;}
+            for(const p of tasks)Promise.resolve(p).then(v=>{if(!done){done=true;resolve(v);}},()=>{
+                if(--remaining===0&&!done){done=true;reject(Error('官方引导全部失败'));}
+            });
+        });
+        const discover=(async()=>{
+            Lizimh._validApiOrigins=[];
+            const domains=['adnet.lizimh.com','adnet.lizi.lat'];
+            let origin;
+            // Same six resolvers and two TXT names as the current IPA. Prefer
+            // normal TLS hostnames in wave one; never disable TLS for IP URLs.
+            // Validate the configured endpoint first; discovery is the repair
+            // path when the old domain disappears, not a mandatory extra hop.
+            try{origin=await first([health(Lizimh.api),health(Lizimh.apiFallback)]);}catch(_){}
+            for(const wave of origin?[]:[['doh.pub','dns.alidns.com','dns.google'],['120.53.53.53','223.5.5.5','doh.360.cn']]){
+                try{origin=await first(wave.flatMap(r=>domains.map(d=>txt(r,d))));break;}catch(_){}
+            }
+            if(!origin){
+                try{
+                    const url='https://lz-1382057604.cos.ap-hongkong.myqcloud.com/5A6F4D2B7E9A1C3D8F0B2E4A6C8E0D2F4B6A8C0E2D4F6A8B0C2E4D6F8A0C2E4B.json';
+                    const r=await Lizimh.apiTimeout(Network.get(url,Lizimh.apiHeaders()),4500);
+                    if(r.status===200)origin=await health(JSON.parse(Lizimh.decodeApiBootstrap(r.body)).domain);
+                }catch(_){}
+            }
+            // These are verified current TXT outputs, not guessed IPs or old
+            // response caches. Health is mandatory before accepting fallback.
+            if(!origin){try{origin=await first(['https://mh.lizimh.net','http://cdn.mechat.fun'].map(health));}catch(_){}}
+            if(!origin)throw Error('无法连接官方API入口，请稍后重试');
+            if(epoch!==Lizimh._apiEpoch)throw Error('API入口状态已变化');
+            Lizimh.api=origin;Lizimh._useFallback=false;
+            Lizimh.apiFallback=healthy.find(x=>x!==origin)||(['https://mh.lizimh.net','http://cdn.mechat.fun'].find(x=>x!==origin));
+            Lizimh._apiReadyAt=Date.now();
+            return origin;
+        })();
+        Lizimh._apiFlight=discover;
+        try{return await discover;}finally{if(Lizimh._apiFlight===discover)Lizimh._apiFlight=null;}
+    }
+
+    static async getJson(path, repaired) {
+        const bases = Lizimh.apiBases();
         const failures = [];
         // DNS and TLS failures on this host are intermittent; retry each host
         // once with a short delay before reporting a network error.
@@ -918,7 +1157,14 @@ class Lizimh extends ComicSource {
                 failures.push(base + ": " + (http ? http[0] : "网络或响应格式错误"));
             }
         }
-        throw new Error("栗子接口请求失败 " + String(path).split("?")[0] + " (" + failures.join("; ") + ")");
+        if (!repaired) {
+            // Only a failed real request triggers official discovery. This
+            // avoids an extra health request on every successful API call.
+            await Lizimh.ensureApi(true);
+            return await Lizimh.getJson(path, true);
+        }
+        const unique = failures.filter((v,i,a)=>a.indexOf(v)===i);
+        throw new Error("栗子接口请求失败 " + String(path).split("?")[0] + " (" + unique.join("; ") + ")");
     }
 
     static fmtDate(iso) { return iso ? String(iso).substring(0, 10) : ""; }
